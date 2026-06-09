@@ -1,0 +1,25 @@
+# User config data — never commit this, it's generated at runtime
+config/
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.venv/
+venv/
+env/
+
+# Build helpers
+_welcome_html.py
+
+# Docker
+docker-compose.yaml
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+*.swp
