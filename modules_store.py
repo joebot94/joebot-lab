@@ -91,7 +91,7 @@ DEVICE_TEMPLATES = [
     {"template": "ipcp505",      "name": "IPCP 505",       "kind": "ipcp505",      "port": 23,
      "desc": "IP Link Control Processor",                 "icon": "🔌",  "module": "ipcp_control"},
     {"template": "mgp",          "name": "MGP 464",        "kind": "mgp",          "port": 23,
-     "desc": "Multi-Graphic Processor",                   "icon": "🖥",  "module": "dashboard"},
+     "desc": "Multi-Graphic Processor",                   "icon": "🖥",  "module": None},
     {"template": "custom_sis",   "name": "Custom SIS Device", "kind": "extron_info", "port": 23,
      "desc": "Any SIS-compatible Extron device",          "icon": "🔧",  "module": None},
 ]

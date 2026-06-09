@@ -1127,7 +1127,8 @@ FRONTEND_HTML = r"""<!doctype html>
   .s-ok{background:var(--ok);box-shadow:0 0 7px rgba(52,211,153,.6)}
   .s-warn{background:var(--warn);box-shadow:0 0 7px rgba(245,185,66,.55)}
   .s-bad{background:var(--bad);box-shadow:0 0 8px rgba(255,84,112,.65)}
-  .s-gray{background:var(--gray)}
+  .s-gray{background:var(--gray);animation:pulse-gray 1.4s ease-in-out infinite}
+  @keyframes pulse-gray{0%,100%{opacity:.3}50%{opacity:1}}
 
   .dev{background:var(--panel2);border:1px solid var(--line);border-radius:10px;
     padding:13px 14px}
@@ -1420,6 +1421,10 @@ function build(data){
           <summary>raw / debug</summary><pre id="rawpre-${dt.id}"></pre></details>`;
       body.appendChild(card);
     });
+    // Auto-open families that have devices (so gray/scanning cards are visible)
+    if(f.dots.length && !openFams.size){
+      fam.classList.add("open"); openFams.add(f.id);
+    }
     fam.querySelector(".fam-head").addEventListener("click",()=>{
       fam.classList.toggle("open");
       if(fam.classList.contains("open")) openFams.add(f.id); else openFams.delete(f.id);
@@ -1468,7 +1473,7 @@ function patch(data){
     document.getElementById("devname-"+id).textContent=d.name;
     const pill=document.getElementById("devpill-"+id);
     pill.className="pill s-"+d.status;
-    pill.textContent=({ok:"online",warn:"warn",bad:"fault",gray:d.online?"online":"offline"})[d.status];
+    pill.textContent=({ok:"ONLINE",warn:"WARN",bad:"FAULT",gray:"SCANNING…"})[d.status]||d.status;
 
     // uptime badge next to pill
     const upEl=document.getElementById("devup-"+id);
