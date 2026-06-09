@@ -984,7 +984,8 @@ async function saveDevice(){
     password: document.getElementById('f-password').value||undefined,
     meta:     meta,
   };
-  if(!d.id||!d.name||!d.ip){toast('ID, Name and IP are required');return;}
+  if(!d.id||!d.name){toast('ID and Name are required');return;}
+  if(!d.ip&&!d.hostname){toast('IP address or Hostname is required');return;}
   const url=editingId?`/api/config/device/${editingId}`:'/api/config/device';
   const method=editingId?'PUT':'POST';
   const r=await fetch(url,{method,headers:{'Content-Type':'application/json'},
