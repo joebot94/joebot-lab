@@ -1397,6 +1397,7 @@ function devBody(d){
 function build(data){
   const grid=document.getElementById("grid");grid.innerHTML="";
   data.families.forEach(f=>{
+    if(!f.dots.length) return; // hide empty families
     const fam=document.createElement("div");
     fam.className="fam"+(openFams.has(f.id)?" open":"");
     fam.id="fam-"+f.id;
@@ -1498,7 +1499,7 @@ async function refresh(){
     // Rebuild DOM if: never built, new devices appeared, or families changed
     const needsBuild = !built ||
       data.families.some(f=>f.dots.some(d=>!document.getElementById("dev-"+d.id))) ||
-      data.families.length !== document.querySelectorAll(".fam").length;
+      data.families.filter(f=>f.dots.length).length !== document.querySelectorAll(".fam").length;
     if(needsBuild) build(data);
     patch(data);
   }catch(e){console.error(e);}
