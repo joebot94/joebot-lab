@@ -293,7 +293,7 @@ def api_logs():
 
 @app.get("/", response_class=HTMLResponse)
 def index():
-    if not modules_store.is_setup_complete() and not config_store.get_devices():
+    if not modules_store.is_setup_complete():
         return RedirectResponse(url="/welcome")
     return HTMLResponse(FRONTEND_HTML)
 
