@@ -155,7 +155,14 @@ def poll_once():
             except Exception as e:
                 r = {"online": False, "status": "warn", "summary": "timeout",
                      "details": [], "error": repr(e)}
-            results[d["id"]] = {**_static(d), **r}
+            try:
+                results[d["id"]] = {**_static(d), **r}
+            except Exception as e:
+                log(f"poll_once: skipping device {d.get('id','?')} — {e}")
+                results[d["id"]] = {**r, "id": d.get("id","?"), "name": d.get("name","?"),
+                                    "ip": d.get("ip",""), "hostname": d.get("hostname",""),
+                                    "family": d.get("family","core"), "role": "",
+                                    "kind": d.get("kind",""), "policy": "lenient", "meta": {}}
 
     now = time.time()
     with _lock:
@@ -202,8 +209,8 @@ def poll_once():
 
 
 def _static(d):
-    return {"id": d["id"], "name": d["name"], "ip": d["ip"],
-            "hostname": d["hostname"], "family": d["family"], "role": d["role"],
+    return {"id": d["id"], "name": d["name"], "ip": d.get("ip", ""),
+            "hostname": d.get("hostname", ""), "family": d["family"], "role": d.get("role", ""),
             "kind": d.get("kind", ""), "policy": d.get("policy", "lenient"),
             "meta": d.get("meta", {})}
 
