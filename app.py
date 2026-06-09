@@ -401,6 +401,10 @@ async def api_reorder(request: Request):
     ok, err = config_store.save(data)
     if not ok:
         return JSONResponse({"error": err}, status_code=500)
+    # Immediately rebuild family order in _state so dashboard reflects it
+    # without waiting for the next full poll cycle
+    with _lock:
+        _state["families"] = _aggregate(_state["devices"])
     return JSONResponse({"ok": True})
 
 
@@ -1473,7 +1477,11 @@ function patch(data){
 async function refresh(){
   try{
     const r=await fetch("/api/status");const data=await r.json();
-    if(!built) build(data);
+    // Rebuild DOM if: never built, new devices appeared, or families changed
+    const needsBuild = !built ||
+      data.families.some(f=>f.dots.some(d=>!document.getElementById("dev-"+d.id))) ||
+      data.families.length !== document.querySelectorAll(".fam").length;
+    if(needsBuild) build(data);
     patch(data);
   }catch(e){console.error(e);}
 }
