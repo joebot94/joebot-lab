@@ -636,7 +636,7 @@ CONFIG_HTML = r"""<!doctype html>
 <header>
   <div class="brand">🦖 JOEBOT LAB</div>
   <nav>
-    <a href="/">Dashboard</a>
+    <a href="/" onclick="event.preventDefault();window.location.href='/?r='+Date.now()">Dashboard</a>
     <a href="/config" class="active">Config</a>
   </nav>
   <div class="spacer"></div>
@@ -1025,6 +1025,11 @@ function toast(msg){
 
 document.getElementById('modal').addEventListener('click',e=>{
   if(e.target===document.getElementById('modal')) closeModal();
+});
+
+// Reload when navigating back to this page (catches bfcache & config→dashboard)
+window.addEventListener('pageshow', e=>{
+  if(e.persisted) window.location.reload();
 });
 
 load();
