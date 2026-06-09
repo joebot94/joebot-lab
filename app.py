@@ -822,6 +822,7 @@ function render(){
         dragType='device'; dragSrc=tr; dragSrcFam=fam.id;
         e.dataTransfer.effectAllowed='move';
         e.dataTransfer.setData('text/plain',d.id);
+        e.stopPropagation(); // prevent bubbling to family dragstart
         setTimeout(()=>tr.classList.add('dragging'),0);
       });
       tr.addEventListener('dragend', ()=>{
