@@ -256,11 +256,27 @@ def _poll_loop():
 app = FastAPI(title="Joebot Lab Dashboard", version="1.0")
 
 
+def _prime_state():
+    """Populate _state with all configured devices in gray/unknown state
+    so the dashboard shows a complete layout before the first poll finishes."""
+    devices = config_store.get_devices()
+    gray = {d["id"]: {**_static(d), "online": False, "status": "gray",
+                      "summary": "pending…", "details": [], "uptime_pct": None,
+                      "last_seen_ago": None, "history": [], "status_changed": False}
+            for d in devices}
+    with _lock:
+        _state["devices"]  = gray
+        _state["families"] = _aggregate(gray)
+        _state["meta"]     = {"version": VERSION, "last_poll": "—",
+                              "poll_seconds": POLL_SECONDS, "duration": None,
+                              "device_count": len(gray)}
+
+
 @app.on_event("startup")
 def _startup():
     config_store.bootstrap()
     log("dashboard starting")
-    poll_once()
+    _prime_state()
     threading.Thread(target=_poll_loop, daemon=True).start()
 
 
