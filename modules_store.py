@@ -78,21 +78,22 @@ ALL_MODULES = [
 
 DEVICE_TEMPLATES = [
     {"template": "dms3600",      "name": "DMS 3600",       "kind": "dms3600",      "port": 23,
-     "desc": "Distribution Matrix Switcher",              "icon": "🎛"},
+     "desc": "Distribution Matrix Switcher",              "icon": "🎛",  "module": "dms_control"},
     {"template": "matrix12800",  "name": "Matrix 12800",   "kind": "matrix12800",  "port": 23,
-     "desc": "128×128 Core Routing Matrix",               "icon": "⚡", "default_password": "admin"},
+     "desc": "128×128 Core Routing Matrix",               "icon": "⚡",  "module": "matrix12800_control",
+     "default_password": "admin"},
     {"template": "smx",          "name": "SMX",            "kind": "smx",          "port": 23,
-     "desc": "System Multi Matrix (modular)",             "icon": "🔀"},
+     "desc": "System Multi Matrix (modular)",             "icon": "🔀",  "module": "smx_control"},
     {"template": "mtpx",         "name": "MTPX Plus",      "kind": "extron_info",  "port": 23,
-     "desc": "Multi-Format Presentation Matrix",          "icon": "📺"},
+     "desc": "Multi-Format Presentation Matrix",          "icon": "📺",  "module": "mtpx_control"},
     {"template": "vtg400",       "name": "VTG 400",        "kind": "extron_info",  "port": 23,
-     "desc": "Video Test Generator",                      "icon": "📡"},
+     "desc": "Video Test Generator",                      "icon": "📡",  "module": "vtg_control"},
     {"template": "ipcp505",      "name": "IPCP 505",       "kind": "ipcp505",      "port": 23,
-     "desc": "IP Link Control Processor",                 "icon": "🔌"},
+     "desc": "IP Link Control Processor",                 "icon": "🔌",  "module": "ipcp_control"},
     {"template": "mgp",          "name": "MGP 464",        "kind": "mgp",          "port": 23,
-     "desc": "Multi-Graphic Processor",                   "icon": "🖥"},
+     "desc": "Multi-Graphic Processor",                   "icon": "🖥",  "module": "dashboard"},
     {"template": "custom_sis",   "name": "Custom SIS Device", "kind": "extron_info", "port": 23,
-     "desc": "Any SIS-compatible Extron device",          "icon": "🔧"},
+     "desc": "Any SIS-compatible Extron device",          "icon": "🔧",  "module": None},
 ]
 
 
