@@ -80,7 +80,7 @@ DEVICE_TEMPLATES = [
     {"template": "dms3600",      "name": "DMS 3600",       "kind": "dms3600",      "port": 23,
      "desc": "Distribution Matrix Switcher",              "icon": "🎛"},
     {"template": "matrix12800",  "name": "Matrix 12800",   "kind": "matrix12800",  "port": 23,
-     "desc": "128×128 Core Routing Matrix",               "icon": "⚡"},
+     "desc": "128×128 Core Routing Matrix",               "icon": "⚡", "default_password": "admin"},
     {"template": "smx",          "name": "SMX",            "kind": "smx",          "port": 23,
      "desc": "System Multi Matrix (modular)",             "icon": "🔀"},
     {"template": "mtpx",         "name": "MTPX Plus",      "kind": "extron_info",  "port": 23,
