@@ -323,13 +323,13 @@ const RELAY_NAMES={
 };
 const PWR_NAMES={1:'12V Port 1',2:'12V Port 2',3:'12V Port 3',4:'12V Port 4'};
 const SERIAL_PORTS=[
-  {port:1,name:'VSC 700D #1',kind:'vsc700',page:null},
-  {port:2,name:'VSC 700D #2',kind:'vsc700',page:null},
-  {port:3,name:'VSC 700D #3',kind:'vsc700',page:null},
-  {port:4,name:'VSC 700D #4',kind:'vsc700',page:null},
+  {port:1,name:'VSC 700D #1',kind:'vsc700',page:'/control/ipcp505/vsc700?port=1'},
+  {port:2,name:'VSC 700D #2',kind:'vsc700',page:'/control/ipcp505/vsc700?port=2'},
+  {port:3,name:'VSC 700D #3',kind:'vsc700',page:'/control/ipcp505/vsc700?port=3'},
+  {port:4,name:'VSC 700D #4',kind:'vsc700',page:'/control/ipcp505/vsc700?port=4'},
   {port:5,name:'USP 405 #1', kind:'usp405',page:'/control/ipcp505/usp405?port=5'},
   {port:6,name:'USP 405 #2', kind:'usp405',page:'/control/ipcp505/usp405?port=6'},
-  {port:7,name:'VSC 900D',   kind:'vsc900',page:null},
+  {port:7,name:'VSC 900D',   kind:'vsc900',page:'/control/ipcp505/vsc900?port=7'},
   {port:8,name:'VTG 400',    kind:'vtg400',page:'/control/ipcp505/vtg400'},
 ];
 
@@ -412,7 +412,9 @@ let probeState={};
 const KIND_MODELS={
   vtg400:['60-564-01','60-564-02','60-564-03'],
   usp405:['60-369-01','60-369-02','60-369-03','60-369-04'],
-  // add vsc700, vsc900 here as we build their pages
+  vsc500:['60-476-01'],
+  vsc700:['60-477-01','60-477-02'],
+  vsc900:['60-478-01','60-478-02'],
 };
 
 function serialDotClass(p){
@@ -1825,7 +1827,11 @@ COM_DEVICE_MAP = {
     "60-369-02": {"name": "USP 405",    "page": "/control/ipcp505/usp405?port={port}"},
     "60-369-03": {"name": "USP 405",    "page": "/control/ipcp505/usp405?port={port}"},
     "60-369-04": {"name": "USP 405",    "page": "/control/ipcp505/usp405?port={port}"},
-    # Add VSC 700D, VSC 900D part numbers here as we build their pages
+    "60-476-01": {"name": "VSC 500",    "page": "/control/ipcp505/vsc500?port={port}"},
+    "60-477-01": {"name": "VSC 700",    "page": "/control/ipcp505/vsc700?port={port}"},
+    "60-477-02": {"name": "VSC 700D",   "page": "/control/ipcp505/vsc700?port={port}"},
+    "60-478-01": {"name": "VSC 900",    "page": "/control/ipcp505/vsc900?port={port}"},
+    "60-478-02": {"name": "VSC 900D",   "page": "/control/ipcp505/vsc900?port={port}"},
 }
 
 @router.get("/api/control/ipcp505/com/scan")
