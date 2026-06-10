@@ -4324,6 +4324,11 @@ SMX_HTML = r"""<!doctype html>
   .io-btn:hover .edit-dot{opacity:1}
   .io-btn .edit-dot:hover{color:var(--c-active)}
 
+  /* signal presence dot on inputs */
+  .sig-dot{width:6px;height:6px;border-radius:50%;background:var(--gray);
+    position:absolute;top:4px;left:5px;transition:background .3s}
+  .sig-dot.live{background:var(--ok);box-shadow:0 0 5px rgba(52,211,153,.6)}
+
   /* input states */
   .in-btn.selected{background:rgba(52,211,153,.18);border-color:var(--ok);
     box-shadow:0 0 10px rgba(52,211,153,.25);color:var(--ok)}
@@ -4508,6 +4513,7 @@ let selectedInput = 0;
 let allTies       = {"00":{},"01":{},"02":{},"04":{}};
 let staged        = new Set();
 let names         = {inputs:{},outputs:{},presets:{}};
+let signals       = {};  // input# -> true/false from dashboard poll
 let confirmState  = {};
 let editTarget    = null;
 
@@ -4578,7 +4584,9 @@ function renderInputGrid(){
     const btn=document.createElement("button");
     btn.className="io-btn in-btn"+(i===selectedInput?" selected":"");
     btn.dataset.n=i;
-    btn.innerHTML=`<span class="bnum">IN ${i}</span>
+    const live=signals[i]===true;
+    btn.innerHTML=`<span class="sig-dot${live?' live':''}"></span>
+      <span class="bnum">IN ${i}</span>
       <span class="bname">${esc(inName(i))}</span>
       <span class="edit-dot" onclick="openEdit(event,'input',${i})">\u270e</span>`;
     btn.addEventListener("click",()=>selectInput(i));
@@ -4827,12 +4835,38 @@ async function doPollNames(){
   }catch(e){ toast("Error: "+e.message); }
 }
 
+// ── signal presence from dashboard poll ───────────────────────────────────────
+async function pollSignals(){
+  try{
+    const r=await fetch("/api/status");
+    const j=await r.json();
+    const devs=Object.values(j.devices||{});
+    const smx=devs.find(d=>d.kind==="smx");
+    if(smx){
+      const next={};
+      // boards is array of {slot,signals:[{label,state}],audio}
+      (smx.boards||[]).forEach(b=>{
+        if(b.audio) return;
+        b.signals.forEach((s,idx)=>{
+          const port=idx+1;
+          if(!next[port]) next[port]=s.state==="ok"||s.state==="warn";
+          else next[port]=next[port]||(s.state==="ok"||s.state==="warn");
+        });
+      });
+      signals=next;
+      renderInputGrid();
+    }
+  }catch(e){}
+}
+
 // ── init ──────────────────────────────────────────────────────────────────────
 (async()=>{
   try{ const r=await fetch("/api/control/smx/names"); names=await r.json(); }catch(e){}
   switchPlane("00");
   renderPresets();
   doConnect();
+  pollSignals();
+  setInterval(pollSignals, 10000);
 })();
 </script>
 </body></html>"""
