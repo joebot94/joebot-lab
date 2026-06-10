@@ -327,12 +327,17 @@ def parse_dms3600(replies):
             details.append({"label": lab, "value": f"{rpm} RPM", "state": fstate})
 
         prim_ok = s[12] == "1"
-        bump("ok" if prim_ok else "bad")
-        details.append({"label": "Primary PSU", "value": "OK" if prim_ok else "FAULT",
-                        "state": "ok" if prim_ok else "bad"})
+        redu_ok = s[13] == "1"
+        if not prim_ok and not redu_ok:
+            bump("bad")   # both down — real fault
+        elif not prim_ok:
+            bump("warn")  # running on redundant only — lost redundancy, still alive
+        details.append({"label": "Primary PSU",
+                        "value": "OK" if prim_ok else "FAULT",
+                        "state": "ok" if prim_ok else ("warn" if redu_ok else "bad")})
         details.append({"label": "Redundant PSU",
-                        "value": "installed" if s[13] == "1" else "not installed",
-                        "state": ""})
+                        "value": "OK" if redu_ok else "not installed",
+                        "state": "ok" if redu_ok else ""})
     else:
         bump("warn")
         details.append({"label": "Health", "value": "no S reading", "state": "warn"})
@@ -377,13 +382,17 @@ def parse_smx(replies, slot_meta):
             details.append({"label": lab, "value": f"{rpm} RPM",
                             "state": "ok" if rpm > 0 else "bad"})
         prim_ok = s[6] == "1"
-        details.append({"label": "Primary PSU", "value": "OK" if prim_ok else "FAULT",
-                        "state": "ok" if prim_ok else "bad"})
-        details.append({"label": "Redundant PSU",
-                        "value": "installed" if s[7] == "1" else "not installed",
-                        "state": ""})
-        if not prim_ok:
+        redu_ok = s[7] == "1"
+        if not prim_ok and not redu_ok:
             status = "bad"
+        elif not prim_ok:
+            status = worse(status, "warn")
+        details.append({"label": "Primary PSU",
+                        "value": "OK" if prim_ok else "FAULT",
+                        "state": "ok" if prim_ok else ("warn" if redu_ok else "bad")})
+        details.append({"label": "Redundant PSU",
+                        "value": "OK" if redu_ok else "not installed",
+                        "state": "ok" if redu_ok else ""})
     else:
         status = "warn"
         details.append({"label": "Health", "value": "no S reading", "state": "warn"})
