@@ -652,9 +652,10 @@ def query_ipcp505(ip, port=23, timeout=4.0, serial_ports=None):
         for i in range(1, 9):
             send(f"{i:02d}O".encode("ascii") + b"\r", f"rly{i}")
 
-        # 12V power port on/off: ESC P {port} DCPP CR
+        # 12V power port query: ESC P {port} DCPP CR  → returns "0" or "1"
+        # Set command (app.py endpoint): ESC P {port} * {state} DCPP CR
         for i in range(1, 5):
-            send(f"\x1bP{i:02d}DCPP".encode("ascii") + b"\r", f"pwr{i}")
+            send(f"\x1bP{i}DCPP".encode("ascii") + b"\r", f"pwr{i}")
 
         # Total 12V power draw (tenths of watts)
         send(b"\x1bADCPP\r", "pwrtotal")

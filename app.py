@@ -37,7 +37,7 @@ import modules_store
 # --------------------------------------------------------------------------- #
 # Config
 # --------------------------------------------------------------------------- #
-VERSION = "2.3.0"   # bump this on every deploy so you can confirm the new code is running
+VERSION = "2.4.0"   # bump this on every deploy so you can confirm the new code is running
 
 PORT          = int(os.getenv("DASHBOARD_PORT", "8080"))
 POLL_SECONDS  = int(os.getenv("POLL_SECONDS", "10"))
@@ -1398,6 +1398,13 @@ function devBody(d){
         <button style="font-family:var(--mono);cursor:pointer;background:rgba(124,106,245,.1);
           color:#a78bfa;border:1px solid rgba(124,106,245,.35);border-radius:7px;
           padding:6px 14px;font-size:12.5px;width:100%">⚡ Route SMX →</button>
+      </a></div>`;}
+  if(d.kind==='ipcp505'){
+    h+=`<div style="margin-top:10px;padding-top:8px;border-top:1px solid var(--line)">
+      <a href="/control/ipcp505" style="text-decoration:none">
+        <button style="font-family:var(--mono);cursor:pointer;background:rgba(245,185,66,.08);
+          color:#f5b942;border:1px solid rgba(245,185,66,.3);border-radius:7px;
+          padding:6px 14px;font-size:12.5px;width:100%">⚡ Control IPCP →</button>
       </a></div>`;}
 
   return h;
@@ -4049,6 +4056,83 @@ def _smx_device():
     return None
 
 
+def _ipcp505_device():
+    for d in config_store.get_devices():
+        if d.get("kind") == "ipcp505":
+            return d
+    return None
+
+
+def _ipcp505_send(ip, tcp_port, command_bytes, timeout=4.0, read_time=0.8):
+    """Open a fresh TCP session to IPCP 505, drain banner, send bytes, return (reply, err)."""
+    import socket as _s
+    try:
+        sock = _s.create_connection((ip, tcp_port), timeout=timeout)
+    except (OSError, _s.timeout) as e:
+        return "", str(e)
+    try:
+        sis._read(sock, 1.5)
+        sock.sendall(command_bytes)
+        resp = sis._read(sock, read_time, idle=0.2).strip()
+        return resp, None
+    except OSError as e:
+        return "", str(e)
+    finally:
+        try:
+            sock.close()
+        except OSError:
+            pass
+
+
+VTG400_TCP_PORT = 2008   # IPCP aux port for COM8 — direct serial passthrough, no ESC framing
+
+
+def _vtg400_query_all(ip, timeout=8.0):
+    """
+    Query VTG 400 state via IPCP TCP aux port 2008 (direct COM8 passthrough).
+    Returns (results_dict, error_str).
+    """
+    import socket as _s
+    try:
+        sock = _s.create_connection((ip, VTG400_TCP_PORT), timeout=timeout)
+    except (OSError, _s.timeout) as e:
+        return {}, str(e)
+    try:
+        results = {}
+        for key, vtg_cmd in [("model", "N"), ("pattern", "J"),
+                              ("resolution", "="), ("temp", "20S"),
+                              ("ire", "15#"), ("color", "10#")]:
+            sock.sendall(vtg_cmd.encode("ascii") + b"\r")
+            results[key] = sis._read(sock, 1.2, idle=0.3).strip()
+        return results, None
+    except OSError as e:
+        return {}, str(e)
+    finally:
+        try:
+            sock.close()
+        except OSError:
+            pass
+
+
+def _vtg400_send(ip, vtg_cmd, timeout=5.0, read_time=1.5):
+    """
+    Send a VTG 400 command via IPCP HTTP serial passthrough.
+    URL format: http://{ip}/?cmd=W08RS|{cmd}
+    This avoids the IPCP intercepting '*' characters on TCP port 2008.
+    Returns (reply, err).
+    """
+    import urllib.request as _ur
+    import urllib.error as _ue
+    import urllib.parse as _up
+    url = f"http://{ip}/?cmd=W08RS%7C{_up.quote(vtg_cmd, safe='')}"
+    try:
+        with _ur.urlopen(url, timeout=timeout) as resp:
+            _ = resp.read()   # fire-and-forget; IPCP returns its frameset HTML
+        return "ok", None
+    except _ue.URLError as e:
+        return "", str(e)
+
+
 @app.get("/control/smx", response_class=HTMLResponse)
 def control_smx():
     return HTMLResponse(SMX_HTML)
@@ -4964,6 +5048,881 @@ async def setup_add_device(request: Request):
 
 
 WELCOME_HTML = '<!doctype html>\n<html lang="en"><head>\n<meta charset="utf-8"/>\n<meta name="viewport" content="width=device-width,initial-scale=1"/>\n<title>JOEBOT LAB · Setup</title>\n<style>\n:root{\n  --bg:#080a0e;--panel:#12151c;--panel2:#181c25;--line:#232836;\n  --ink:#e8ebf0;--muted:#6b7585;--faint:#2a3040;\n  --ok:#34d399;--warn:#f5b942;--bad:#ff5470;--accent:#7c6af5;\n  --mono:ui-monospace,"SF Mono","JetBrains Mono",Menlo,Consolas,monospace;\n}\n*{box-sizing:border-box;margin:0;padding:0;-webkit-tap-highlight-color:transparent}\nbody{background:var(--bg);color:var(--ink);font-family:var(--mono);\n  min-height:100dvh;display:flex;flex-direction:column;overflow-x:hidden}\n\n/* ── scanlines texture ── */\nbody::before{content:\'\';position:fixed;inset:0;pointer-events:none;z-index:0;\n  background:repeating-linear-gradient(0deg,\n    transparent,transparent 2px,rgba(0,0,0,.08) 2px,rgba(0,0,0,.08) 4px)}\n\n/* ── step progress bar ── */\n.progress-bar{position:fixed;top:0;left:0;right:0;height:2px;z-index:50;\n  background:var(--faint)}\n.progress-fill{height:100%;background:var(--ok);transition:width .5s cubic-bezier(.4,0,.2,1)}\n\n/* ── step wrapper ── */\n.step{display:none;min-height:100dvh;flex-direction:column;\n  align-items:center;justify-content:center;padding:40px 20px;\n  position:relative;z-index:1}\n.step.active{display:flex}\n\n/* ── step 1: welcome ── */\n.welcome-wrap{text-align:center;max-width:640px}\n.logo-mark{font-size:clamp(48px,10vw,80px);font-weight:900;letter-spacing:-.02em;\n  line-height:1;margin-bottom:8px}\n.logo-mark .j{color:var(--ok)}\n.logo-mark .rest{color:var(--ink)}\n.logo-sub{font-size:clamp(11px,2vw,14px);letter-spacing:.35em;text-transform:uppercase;\n  color:var(--muted);margin-bottom:48px}\n.welcome-tagline{font-size:clamp(18px,3.5vw,26px);font-weight:700;\n  line-height:1.35;margin-bottom:16px;color:var(--ink)}\n.welcome-desc{font-size:clamp(13px,2vw,15px);color:var(--muted);\n  line-height:1.7;margin-bottom:48px;max-width:480px;margin-left:auto;margin-right:auto}\n.feature-row{display:flex;gap:24px;justify-content:center;\n  flex-wrap:wrap;margin-bottom:52px}\n.feat{text-align:center;min-width:90px}\n.feat-icon{font-size:24px;margin-bottom:6px}\n.feat-label{font-size:11px;color:var(--muted);letter-spacing:.05em}\n\n/* ── step 2: modules ── */\n.step-header{text-align:center;margin-bottom:36px;max-width:640px}\n.step-num{font-size:11px;letter-spacing:.2em;text-transform:uppercase;\n  color:var(--ok);margin-bottom:10px}\n.step-title{font-size:clamp(22px,4vw,32px);font-weight:800;margin-bottom:10px}\n.step-desc{font-size:13.5px;color:var(--muted);line-height:1.6}\n\n.module-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));\n  gap:10px;width:100%;max-width:900px;margin-bottom:36px}\n.mod-card{background:var(--panel);border:1.5px solid var(--line);border-radius:12px;\n  padding:14px 16px;cursor:pointer;transition:all .15s;\n  display:flex;gap:12px;align-items:flex-start;position:relative;user-select:none}\n.mod-card:hover{border-color:var(--muted)}\n.mod-card.selected{border-color:var(--ok);background:rgba(52,211,153,.06)}\n.mod-card.required{border-color:var(--faint);cursor:default;opacity:.7}\n.mod-card.required.selected{border-color:rgba(52,211,153,.3);opacity:1}\n.mod-icon{font-size:22px;flex-shrink:0;margin-top:1px}\n.mod-body{flex:1;min-width:0}\n.mod-name{font-size:13px;font-weight:700;margin-bottom:3px;\n  display:flex;align-items:center;gap:6px}\n.mod-badge{font-size:9px;letter-spacing:.06em;padding:1px 6px;border-radius:4px;\n  background:rgba(124,106,245,.15);color:var(--accent);border:1px solid rgba(124,106,245,.25)}\n.mod-desc{font-size:11.5px;color:var(--muted);line-height:1.5}\n.mod-check{position:absolute;top:12px;right:12px;\n  width:18px;height:18px;border-radius:5px;\n  border:1.5px solid var(--line);background:var(--panel2);\n  display:flex;align-items:center;justify-content:center;\n  font-size:11px;transition:all .12s}\n.mod-card.selected .mod-check{background:var(--ok);border-color:var(--ok);color:#000}\n.mod-card.required .mod-check{background:var(--faint);border-color:var(--faint);color:var(--muted)}\n\n/* ── step 3: devices ── */\n.template-grid{display:flex;flex-wrap:wrap;justify-content:center;\n  gap:8px;width:100%;max-width:900px;margin-bottom:28px}\n.tmpl-card{background:var(--panel);border:1.5px solid var(--line);border-radius:10px;\n  padding:14px 12px;cursor:pointer;transition:all .15s;text-align:center;\n  display:flex;flex-direction:column;align-items:center;gap:6px;user-select:none;\n  width:160px;flex-shrink:0}\n.tmpl-card:hover{border-color:var(--muted);background:var(--panel2)}\n.tmpl-card.selected{border-color:var(--accent);background:rgba(124,106,245,.08)}\n.tmpl-icon{font-size:26px}\n.tmpl-name{font-size:12px;font-weight:700;color:var(--ink)}\n.tmpl-desc{font-size:10px;color:var(--muted);line-height:1.4}\n\n.device-form{width:100%;max-width:580px;background:var(--panel);\n  border:1px solid var(--line);border-radius:12px;padding:20px;margin-bottom:16px;\n  display:none}\n.device-form.visible{display:block}\n.form-row{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:10px}\n.form-row.one{grid-template-columns:1fr}\n.field label{display:block;font-size:10.5px;letter-spacing:.07em;text-transform:uppercase;\n  color:var(--muted);margin-bottom:4px}\n.field input{width:100%;background:var(--panel2);border:1px solid var(--line);\n  color:var(--ink);border-radius:7px;padding:8px 10px;\n  font-family:var(--mono);font-size:13px;transition:border-color .15s}\n.field input:focus{outline:none;border-color:var(--accent)}\n.field input::placeholder{color:var(--faint)}\n.form-actions{display:flex;gap:8px;margin-top:6px}\n\n.device-list{width:100%;max-width:580px;display:flex;flex-direction:column;gap:6px;\n  margin-bottom:20px}\n.dev-item{background:var(--panel2);border:1px solid var(--line);border-radius:8px;\n  padding:10px 14px;display:flex;align-items:center;gap:10px}\n.dev-item-icon{font-size:18px}\n.dev-item-name{font-size:13px;font-weight:600;flex:1}\n.dev-item-ip{font-size:11px;color:var(--muted)}\n.dev-item-del{background:none;border:none;color:var(--muted);cursor:pointer;\n  font-size:16px;padding:2px 6px;border-radius:4px}\n.dev-item-del:hover{color:var(--bad);background:rgba(255,84,112,.1)}\n\n/* ── step 4: done ── */\n.done-wrap{text-align:center;max-width:560px}\n.done-icon{font-size:64px;margin-bottom:20px}\n.done-title{font-size:clamp(24px,4vw,36px);font-weight:800;margin-bottom:12px}\n.done-desc{font-size:14px;color:var(--muted);line-height:1.7;margin-bottom:36px}\n.done-summary{background:var(--panel);border:1px solid var(--line);border-radius:12px;\n  padding:20px;text-align:left;margin-bottom:36px;width:100%}\n.done-row{display:flex;align-items:center;gap:10px;padding:7px 0;\n  border-bottom:1px solid var(--faint);font-size:13px}\n.done-row:last-child{border-bottom:none}\n.done-row-icon{font-size:16px;width:24px;text-align:center}\n.done-row-label{color:var(--muted);flex:1}\n.done-row-val{color:var(--ok);font-weight:600}\n\n/* ── shared buttons ── */\n.btn-primary{font-family:var(--mono);cursor:pointer;font-size:14px;font-weight:700;\n  letter-spacing:.06em;padding:13px 36px;border-radius:10px;border:none;\n  background:var(--ok);color:#061a12;transition:all .15s}\n.btn-primary:hover{background:#4aedb0;transform:translateY(-1px);\n  box-shadow:0 6px 24px rgba(52,211,153,.3)}\n.btn-primary:active{transform:translateY(0)}\n.btn-secondary{font-family:var(--mono);cursor:pointer;font-size:13px;\n  padding:10px 22px;border-radius:8px;\n  background:transparent;color:var(--muted);border:1px solid var(--line)}\n.btn-secondary:hover{color:var(--ink);border-color:var(--muted)}\n.btn-accent{font-family:var(--mono);cursor:pointer;font-size:13px;font-weight:600;\n  padding:9px 20px;border-radius:8px;border:none;\n  background:var(--accent);color:#fff;transition:all .15s}\n.btn-accent:hover{background:#9585f8}\n.btn-small{font-family:var(--mono);cursor:pointer;font-size:12px;\n  padding:7px 14px;border-radius:7px;\n  background:var(--panel2);color:var(--muted);border:1px solid var(--line)}\n.btn-small:hover{color:var(--ink);border-color:var(--muted)}\n.btn-row{display:flex;gap:10px;align-items:center;justify-content:center;flex-wrap:wrap}\n.btn-row.left{justify-content:flex-start}\n\n/* ── corner skip link ── */\n.skip-link{position:fixed;bottom:20px;right:20px;z-index:50;\n  font-size:11.5px;color:var(--muted);cursor:pointer;\n  background:var(--panel);border:1px solid var(--line);\n  border-radius:6px;padding:5px 12px;text-decoration:none;transition:all .15s}\n.skip-link:hover{color:var(--ink);border-color:var(--muted)}\n\n/* ── glow effects ── */\n.glow-ok{text-shadow:0 0 30px rgba(52,211,153,.4)}\n.glow-accent{text-shadow:0 0 30px rgba(124,106,245,.4)}\n\n/* ── toast ── */\n.toast{position:fixed;bottom:20px;left:50%;transform:translateX(-50%);\n  background:var(--panel2);border:1px solid var(--line);border-radius:8px;\n  padding:9px 18px;font-size:12.5px;opacity:0;transition:opacity .25s;\n  pointer-events:none;z-index:200;white-space:nowrap}\n.toast.show{opacity:1}\n\n/* ── responsive ── */\n@media(max-width:500px){\n  .feature-row{gap:16px}\n  .form-row{grid-template-columns:1fr}\n  .module-grid{grid-template-columns:1fr}\n}\n</style></head>\n<body>\n\n<div class="progress-bar"><div class="progress-fill" id="prog" style="width:0%"></div></div>\n\n<!-- STEP 1: WELCOME -->\n<div class="step active" id="step-1">\n  <div class="welcome-wrap">\n    <div class="logo-mark glow-ok">\n      <span class="j">J</span><span class="rest">OEBOT LAB</span>\n    </div>\n    <div class="logo-sub">AV rack control system</div>\n\n    <div class="welcome-tagline">Modern control for classic AV gear.</div>\n    <div class="welcome-desc">\n      A local-first dashboard for Extron and pro AV equipment.\n      Run one Docker container, open a browser, and take control of gear\n      that deserves better software than it shipped with.\n    </div>\n\n    <div class="feature-row">\n      <div class="feat"><div class="feat-icon">📊</div><div class="feat-label">Live status</div></div>\n      <div class="feat"><div class="feat-icon">⚡</div><div class="feat-label">Route & control</div></div>\n      <div class="feat"><div class="feat-icon">🗂</div><div class="feat-label">Config editor</div></div>\n      <div class="feat"><div class="feat-icon">🤖</div><div class="feat-label">Auto-switching</div></div>\n      <div class="feat"><div class="feat-icon">🐳</div><div class="feat-label">Docker-packaged</div></div>\n    </div>\n\n    <div class="btn-row">\n      <button class="btn-primary" onclick="goStep(2)">Get Started →</button>\n      <button class="btn-secondary" onclick="skipSetup()">Skip setup</button>\n    </div>\n  </div>\n</div>\n\n<!-- STEP 2: MODULES -->\n<div class="step" id="step-2">\n  <div class="step-header">\n    <div class="step-num">Step 1 of 3</div>\n    <div class="step-title">What do you want to use?</div>\n    <div class="step-desc">\n      Enable the modules that match your gear. Disabled modules have zero overhead —\n      no polling, no background tasks, nothing.\n    </div>\n  </div>\n  <div class="module-grid" id="module-grid"></div>\n  <div class="btn-row">\n    <button class="btn-secondary" onclick="goStep(1)">← Back</button>\n    <button class="btn-primary" onclick="saveModulesAndNext()">Next →</button>\n  </div>\n</div>\n\n<!-- STEP 3: DEVICES -->\n<div class="step" id="step-3">\n  <div class="step-header">\n    <div class="step-num">Step 2 of 3</div>\n    <div class="step-title">Add your devices</div>\n    <div class="step-desc">\n      Pick a device type, fill in the name and IP. You can add more anytime from the device manager.\n    </div>\n  </div>\n\n  <div class="device-list" id="device-list"></div>\n\n  <div class="template-grid" id="template-grid"></div>\n\n  <div class="device-form" id="device-form">\n    <div class="form-row">\n      <div class="field">\n        <label>Device name</label>\n        <input id="f-name" placeholder="e.g. Main Matrix"/>\n      </div>\n      <div class="field">\n        <label>IP / Hostname</label>\n        <input id="f-ip" placeholder="10.0.0.12 or device.local"/>\n      </div>\n    </div>\n    <div class="form-row">\n      <div class="field">\n        <label>Port</label>\n        <input id="f-port" placeholder="23" value="23"/>\n      </div>\n      <div class="field">\n        <label>Password <span style="color:var(--faint);font-size:9px">if required</span></label>\n        <input id="f-password" placeholder="leave blank if none" autocomplete="off"/>\n      </div>\n    </div>\n    <div class="form-row one">\n      <div class="field" style="display:flex;gap:8px">\n        <button class="btn-accent" onclick="addDevice()">+ Add Device</button>\n        <button class="btn-small" onclick="cancelForm()">Cancel</button>\n      </div>\n    </div>\n  </div>\n\n  <div class="btn-row" style="margin-top:8px">\n    <button class="btn-secondary" onclick="goStep(2)">← Back</button>\n    <button class="btn-primary" onclick="finishSetup()">\n      <span id="next-lbl">Skip for now →</span>\n    </button>\n  </div>\n</div>\n\n<!-- STEP 4: DONE -->\n<div class="step" id="step-4">\n  <div class="done-wrap">\n    <div class="done-icon">🚀</div>\n    <div class="done-title glow-ok">Lab is ready.</div>\n    <div class="done-desc">Taking you to the dashboard…</div>\n  </div>\n</div>\n\n<a class="skip-link" onclick="skipSetup()">Skip → Dashboard</a>\n<div class="toast" id="toast"></div>\n\n<script>\n// ── state ──────────────────────────────────────────────────────────────────\nlet currentStep = 1;\nlet allModules = [];\nlet allTemplates = [];\nlet filteredTemplates = [];\nlet enabledModules = new Set();\nlet addedDevices = [];\nlet selectedTemplate = null;\n\nconst STEP_PROGRESS = {1:0, 2:33, 3:66, 4:100};\n\n// ── toast ──────────────────────────────────────────────────────────────────\nlet _tt;\nfunction toast(msg, dur=2400){\n  const el = document.getElementById(\'toast\');\n  el.textContent = msg; el.classList.add(\'show\');\n  clearTimeout(_tt); _tt = setTimeout(()=>el.classList.remove(\'show\'), dur);\n}\n\n// ── step navigation ────────────────────────────────────────────────────────\nfunction goStep(n){\n  document.getElementById(\'step-\'+currentStep).classList.remove(\'active\');\n  currentStep = n;\n  document.getElementById(\'step-\'+n).classList.add(\'active\');\n  document.getElementById(\'prog\').style.width = STEP_PROGRESS[n] + \'%\';\n  window.scrollTo(0,0);\n}\n\n// ── finish setup ───────────────────────────────────────────────────────────\nasync function finishSetup(){\n  goStep(4);\n  try{ await fetch(\'/api/setup/complete\',{method:\'POST\'}); }catch(e){}\n  window.location.href = \'/\';\n}\n\n// ── module grid ────────────────────────────────────────────────────────────\nfunction renderModules(){\n  const box = document.getElementById(\'module-grid\');\n  box.innerHTML = \'\';\n  allModules.forEach(m => {\n    const on = enabledModules.has(m.id);\n    const req = m.required;\n    const card = document.createElement(\'div\');\n    card.className = \'mod-card\' + (on?\' selected\':\'\') + (req?\' required\':\'\');\n    card.dataset.id = m.id;\n    card.innerHTML = `\n      <div class="mod-icon">${m.icon||\'🔧\'}</div>\n      <div class="mod-body">\n        <div class="mod-name">${esc(m.name)}${m.badge?`<span class="mod-badge">${esc(m.badge)}</span>`:\'\'}${req?\'<span class="mod-badge" style="background:rgba(52,211,153,.1);color:var(--ok);border-color:rgba(52,211,153,.2)">required</span>\':\'\'}</div>\n        <div class="mod-desc">${esc(m.desc)}</div>\n      </div>\n      <div class="mod-check">${on?(req?\'—\':\'✓\'):\'\'}</div>`;\n    if(!req) card.addEventListener(\'click\', ()=>toggleModule(m.id));\n    box.appendChild(card);\n  });\n}\n\nfunction toggleModule(id){\n  if(enabledModules.has(id)) enabledModules.delete(id);\n  else enabledModules.add(id);\n  renderModules();\n}\n\nasync function saveModulesAndNext(){\n  try{\n    await fetch(\'/api/setup/modules\',{method:\'POST\',\n      headers:{\'Content-Type\':\'application/json\'},\n      body:JSON.stringify({enabled:[...enabledModules]})});\n  }catch(e){ toast(\'Could not save modules, continuing anyway\'); }\n  // Filter templates to those matching enabled modules\n  filteredTemplates = allTemplates.filter(t => t.module && enabledModules.has(t.module));\n  renderTemplates();\n  goStep(3);\n}\n\n// ── template grid ──────────────────────────────────────────────────────────\nfunction renderTemplates(){\n  const box = document.getElementById(\'template-grid\');\n  box.innerHTML = \'\';\n  filteredTemplates.forEach(t => {\n    const card = document.createElement(\'div\');\n    card.className = \'tmpl-card\' + (selectedTemplate===t.template?\' selected\':\'\');\n    card.dataset.tmpl = t.template;\n    card.innerHTML = `\n      <div class="tmpl-icon">${t.icon||\'🔧\'}</div>\n      <div class="tmpl-name">${esc(t.name)}</div>\n      <div class="tmpl-desc">${esc(t.desc)}</div>`;\n    card.addEventListener(\'click\', ()=>selectTemplate(t));\n    box.appendChild(card);\n  });\n}\n\nfunction selectTemplate(t){\n  selectedTemplate = t.template;\n  renderTemplates();\n  document.getElementById(\'f-name\').value = t.name;\n  document.getElementById(\'f-port\').value = t.port;\n  document.getElementById(\'f-ip\').value = \'\';\n  document.getElementById(\'f-password\').value = t.default_password||\'\';\n  document.getElementById(\'device-form\').classList.add(\'visible\');\n  setTimeout(()=>document.getElementById(\'f-ip\').focus(), 80);\n}\n\nfunction cancelForm(){\n  selectedTemplate = null;\n  renderTemplates();\n  document.getElementById(\'device-form\').classList.remove(\'visible\');\n}\n\nasync function addDevice(){\n  const name     = document.getElementById(\'f-name\').value.trim();\n  const ip       = document.getElementById(\'f-ip\').value.trim();\n  const port     = parseInt(document.getElementById(\'f-port\').value) || 23;\n  const password = document.getElementById(\'f-password\').value.trim() || null;\n  if(!name || !ip){ toast(\'Name and IP are required\'); return; }\n  if(!selectedTemplate){ toast(\'Select a device type\'); return; }\n  try{\n    const r = await fetch(\'/api/setup/add-device\',{method:\'POST\',\n      headers:{\'Content-Type\':\'application/json\'},\n      body:JSON.stringify({template:selectedTemplate, name, ip, port, password})});\n    const j = await r.json();\n    if(!j.ok){ toast(\'Error: \'+(j.error||\'unknown\')); return; }\n    const tmpl = allTemplates.find(t=>t.template===selectedTemplate);\n    const displayHost = j.device?.hostname || j.device?.ip || ip;\n    addedDevices.push({name, ip:displayHost, icon:tmpl?.icon||\'🔧\', kind:tmpl?.name||selectedTemplate});\n    renderDeviceList();\n    cancelForm();\n    updateNextLabel();\n    toast(`Added ${name}` + (j.device?.hostname ? ` → ${j.device.ip}` : \'\'));\n  }catch(e){ toast(\'Error: \'+e.message); }\n}\n\nfunction renderDeviceList(){\n  const box = document.getElementById(\'device-list\');\n  box.innerHTML = \'\';\n  addedDevices.forEach((d,i)=>{\n    const div = document.createElement(\'div\');\n    div.className = \'dev-item\';\n    div.innerHTML = `<span class="dev-item-icon">${d.icon}</span>\n      <span class="dev-item-name">${esc(d.name)}</span>\n      <span class="dev-item-ip">${esc(d.ip)}</span>\n      <button class="dev-item-del" onclick="removeDevice(${i})" title="Remove">×</button>`;\n    box.appendChild(div);\n  });\n}\n\nfunction removeDevice(i){\n  addedDevices.splice(i,1);\n  renderDeviceList();\n  updateNextLabel();\n}\n\nfunction updateNextLabel(){\n  document.getElementById(\'next-lbl\').textContent =\n    addedDevices.length > 0 ? \'Next →\' : \'Skip for now →\';\n}\n\nasync function skipSetup(){\n  await finishSetup();\n}\n\n// ── helpers ────────────────────────────────────────────────────────────────\nfunction esc(s){ return String(s||\'\').replace(/[&<>"]/g,c=>({\'&\':\'&amp;\',\'<\':\'&lt;\',\'>\':\'&gt;\',\'"\':\'&quot;\'}[c])); }\n\n// ── init ───────────────────────────────────────────────────────────────────\n(async()=>{\n  try{\n    const r = await fetch(\'/api/setup/state\');\n    const j = await r.json();\n    allModules   = j.all_modules   || [];\n    allTemplates = j.device_templates || [];\n    enabledModules = new Set(j.enabled_modules || []);\n    renderModules();\n    filteredTemplates = allTemplates;\n    renderTemplates();\n    // If they already have devices, pre-populate the added list\n    if(j.device_count > 0){\n      document.getElementById(\'next-lbl\').textContent = \'Next →\';\n    }\n  }catch(e){\n    console.error(\'setup state load failed\', e);\n    toast(\'Could not load setup data\');\n  }\n})();\n</script>\n</body></html>'
+
+
+# =========================================================================== #
+# IPCP Pro 505 Control Hub  (/control/ipcp505)
+# =========================================================================== #
+
+IPCP505_HTML = r"""<!doctype html>
+<html lang="en"><head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>IPCP Pro 505 · Control</title>
+<style>
+:root{
+  --bg:#0c0e12;--panel:#15181f;--panel2:#1b1f28;--line:#262b36;
+  --ink:#e8ebf0;--muted:#8b93a3;--faint:#1f232d;
+  --ok:#34d399;--warn:#f5b942;--bad:#ff5470;--accent:#f5b942;
+  --mono:ui-monospace,"SF Mono","JetBrains Mono",Menlo,Consolas,monospace;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:var(--bg);color:var(--ink);font-family:var(--mono);
+  min-height:100dvh;padding-bottom:60px}
+header{display:flex;align-items:center;gap:14px;padding:14px 20px;
+  border-bottom:1px solid var(--line);
+  background:linear-gradient(180deg,rgba(245,185,66,.06),transparent)}
+.brand{font-size:18px;font-weight:800;letter-spacing:.08em;color:var(--accent)}
+.hdr-sub{font-size:12px;color:var(--muted)}
+.spacer{flex:1}
+.back-btn{font-family:var(--mono);font-size:12px;color:var(--muted);
+  background:none;border:1px solid var(--line);border-radius:6px;
+  padding:5px 12px;text-decoration:none;transition:all .15s}
+.back-btn:hover{color:var(--ink);border-color:var(--muted)}
+main{max-width:960px;margin:0 auto;padding:20px 16px;
+  display:flex;flex-direction:column;gap:20px}
+
+/* status bar */
+.status-bar{display:flex;align-items:center;gap:10px;padding:8px 16px;
+  background:var(--panel);border:1px solid var(--line);border-radius:8px;
+  font-size:12px;color:var(--muted)}
+.sdot{width:7px;height:7px;border-radius:50%;background:var(--muted);flex-shrink:0}
+.sdot.ok{background:var(--ok)}
+.sdot.bad{background:var(--bad)}
+.stat-pill{background:var(--panel2);border:1px solid var(--line);border-radius:5px;
+  padding:2px 10px;font-size:11.5px;color:var(--ink)}
+
+/* section */
+.sec{background:var(--panel);border:1px solid var(--line);border-radius:12px;
+  overflow:hidden}
+.sec-head{display:flex;align-items:center;gap:10px;padding:12px 18px;
+  border-bottom:1px solid var(--line);
+  background:linear-gradient(90deg,rgba(245,185,66,.04),transparent)}
+.sec-title{font-size:11px;letter-spacing:.14em;text-transform:uppercase;
+  color:var(--accent);font-weight:700}
+.sec-count{font-size:11px;color:var(--muted)}
+.sec-body{padding:14px}
+
+/* relay grid — 4 across, 2 rows */
+.relay-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:8px}
+.relay-card{background:var(--panel2);border:1px solid var(--line);border-radius:9px;
+  padding:12px 10px;text-align:center}
+.relay-lbl{font-size:10px;color:var(--muted);letter-spacing:.1em;margin-bottom:6px}
+.relay-name{font-size:12px;font-weight:600;color:var(--ink);margin-bottom:10px;
+  min-height:1.3em;line-height:1.3}
+.relay-btn{font-family:var(--mono);font-size:11.5px;font-weight:700;
+  width:100%;padding:7px 0;border-radius:6px;cursor:pointer;
+  border:1px solid var(--line);background:var(--panel);color:var(--muted);
+  transition:all .15s}
+.relay-btn.closed{background:rgba(52,211,153,.13);color:var(--ok);
+  border-color:rgba(52,211,153,.35);box-shadow:inset 0 0 0 1px rgba(52,211,153,.15)}
+.relay-btn:hover:not(:disabled){border-color:var(--muted);color:var(--ink)}
+.relay-btn.closed:hover:not(:disabled){background:rgba(52,211,153,.22)}
+.relay-btn:disabled{opacity:.5;cursor:default}
+
+/* 12V grid — 4 across in one row */
+.pwr-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:8px}
+.pwr-card{background:var(--panel2);border:1px solid var(--line);border-radius:9px;
+  padding:12px 10px;text-align:center}
+.pwr-lbl{font-size:10px;color:var(--muted);letter-spacing:.1em;margin-bottom:6px}
+.pwr-name{font-size:12px;font-weight:600;color:var(--ink);margin-bottom:10px;
+  min-height:1.3em;line-height:1.3}
+.pwr-btns{display:flex;gap:5px}
+.pwr-on{font-family:var(--mono);font-size:11.5px;font-weight:700;flex:1;padding:7px 0;
+  border-radius:6px;cursor:pointer;border:1px solid rgba(52,211,153,.3);
+  background:rgba(52,211,153,.06);color:var(--ok);transition:all .15s}
+.pwr-on:hover{background:rgba(52,211,153,.16)}
+.pwr-on.active{background:rgba(52,211,153,.18);border-color:var(--ok);
+  box-shadow:inset 0 0 0 1px rgba(52,211,153,.2)}
+.pwr-off{font-family:var(--mono);font-size:11.5px;font-weight:700;flex:1;padding:7px 0;
+  border-radius:6px;cursor:pointer;border:1px solid rgba(255,84,112,.25);
+  background:rgba(255,84,112,.04);color:var(--bad);transition:all .15s}
+.pwr-off:hover{background:rgba(255,84,112,.14)}
+.pwr-off.active{background:rgba(255,84,112,.14);border-color:var(--bad)}
+
+/* serial grid */
+.serial-grid{display:flex;flex-direction:column;gap:6px}
+.serial-card{background:var(--panel2);border:1px solid var(--line);border-radius:8px;
+  padding:11px 14px;display:flex;align-items:center;gap:12px}
+.serial-dot{width:7px;height:7px;border-radius:50%;flex-shrink:0;background:var(--faint)}
+.serial-dot.live{background:var(--ok);box-shadow:0 0 6px rgba(52,211,153,.5)}
+.serial-dot.warn{background:var(--accent);box-shadow:0 0 6px rgba(124,106,245,.5)}
+.serial-dot.mismatch{background:var(--bad);box-shadow:0 0 6px rgba(255,84,112,.5)}
+.serial-port{font-size:11px;color:var(--muted);letter-spacing:.06em;
+  width:42px;flex-shrink:0}
+.serial-info{flex:1}
+.serial-name{font-size:13px;font-weight:600;color:var(--ink)}
+.serial-kind{font-size:10.5px;color:var(--muted)}
+.serial-btn{font-family:var(--mono);font-size:11.5px;padding:5px 14px;
+  border-radius:6px;border:1px solid var(--line);background:none;
+  color:var(--muted);text-decoration:none;transition:all .15s;white-space:nowrap}
+.serial-btn:hover{color:var(--ink);border-color:var(--muted)}
+.serial-btn.live{border-color:rgba(245,185,66,.4);color:var(--accent)}
+.serial-btn.live:hover{background:rgba(245,185,66,.07)}
+.serial-btn.soon{opacity:.35;cursor:default;pointer-events:none}
+.serial-btn.mismatch{border-color:rgba(255,84,112,.4);color:var(--bad);cursor:default;pointer-events:none}
+.serial-btn.found{border-color:rgba(124,106,245,.4);color:var(--accent)}
+.serial-btn.found:hover{background:rgba(124,106,245,.07)}
+.serial-card.mismatch-card{border-color:rgba(255,84,112,.25);background:rgba(255,84,112,.04)}
+
+.toast{position:fixed;bottom:20px;left:50%;transform:translateX(-50%);
+  background:var(--panel2);border:1px solid var(--line);border-radius:8px;
+  padding:8px 18px;font-size:12px;opacity:0;transition:opacity .25s;
+  pointer-events:none;z-index:100;white-space:nowrap}
+.toast.show{opacity:1}
+@media(max-width:600px){
+  .relay-grid{grid-template-columns:repeat(2,1fr)}
+  .pwr-grid{grid-template-columns:repeat(2,1fr)}
+}
+</style></head>
+<body>
+<header>
+  <span class="brand">IPCP PRO 505</span>
+  <span class="hdr-sub">Control Hub</span>
+  <span class="spacer"></span>
+  <a href="/" class="back-btn">← Dashboard</a>
+</header>
+<main>
+  <!-- status -->
+  <div class="status-bar">
+    <div class="sdot" id="sdot"></div>
+    <span id="stext">Connecting…</span>
+    <span class="spacer"></span>
+    <span class="stat-pill" id="relay-summary">— relays</span>
+    <span class="stat-pill" id="pwr-summary">— 12V</span>
+  </div>
+
+  <!-- RELAYS -->
+  <div class="sec">
+    <div class="sec-head">
+      <span class="sec-title">Relays</span>
+      <span class="sec-count" id="relay-count"></span>
+    </div>
+    <div class="sec-body">
+      <div class="relay-grid" id="relay-grid"></div>
+    </div>
+  </div>
+
+  <!-- 12V POWER -->
+  <div class="sec">
+    <div class="sec-head">
+      <span class="sec-title">12V Power Ports</span>
+      <span class="sec-count" id="pwr-count"></span>
+    </div>
+    <div class="sec-body">
+      <div class="pwr-grid" id="pwr-grid"></div>
+    </div>
+  </div>
+
+  <!-- SERIAL DEVICES -->
+  <div class="sec">
+    <div class="sec-head">
+      <span class="sec-title">Serial Devices</span>
+      <span class="sec-count">8 COM ports</span>
+    </div>
+    <div class="sec-body">
+      <div class="serial-grid" id="serial-grid"></div>
+    </div>
+  </div>
+</main>
+<div class="toast" id="toast"></div>
+
+<script>
+const RELAY_NAMES={
+  1:'Relay 1',2:'Relay 2',3:'Relay 3',4:'Relay 4',
+  5:'Relay 5',6:'Relay 6',7:'Relay 7',8:'Relay 8'
+};
+const PWR_NAMES={1:'12V Port 1',2:'12V Port 2',3:'12V Port 3',4:'12V Port 4'};
+const SERIAL_PORTS=[
+  {port:1,name:'VSC 700D #1',kind:'vsc700',page:null},
+  {port:2,name:'VSC 700D #2',kind:'vsc700',page:null},
+  {port:3,name:'VSC 700D #3',kind:'vsc700',page:null},
+  {port:4,name:'VSC 700D #4',kind:'vsc700',page:null},
+  {port:5,name:'USP 405 #1', kind:'usp405',page:null},
+  {port:6,name:'USP 405 #2', kind:'usp405',page:null},
+  {port:7,name:'VSC 900D',   kind:'vsc900',page:null},
+  {port:8,name:'VTG 400',    kind:'vtg400',page:'/control/ipcp505/vtg400'},
+];
+
+let relayState={}, pwrState={};
+let _tt;
+function toast(msg,dur=2400){
+  const el=document.getElementById('toast');
+  el.textContent=msg;el.classList.add('show');
+  clearTimeout(_tt);_tt=setTimeout(()=>el.classList.remove('show'),dur);
+}
+
+// ── relays ───────────────────────────────────────────────────────────────────
+function buildRelayGrid(){
+  const g=document.getElementById('relay-grid');g.innerHTML='';
+  for(let i=1;i<=8;i++){
+    const c=relayState[i]||false;
+    const d=document.createElement('div');d.className='relay-card';
+    d.innerHTML=`<div class="relay-lbl">RELAY ${i}</div>
+      <div class="relay-name">${RELAY_NAMES[i]}</div>
+      <button class="relay-btn${c?' closed':''}" id="rly-${i}"
+        onclick="toggleRelay(${i})">${c?'● CLOSED':'○ OPEN'}</button>`;
+    g.appendChild(d);
+  }
+  const n=Object.values(relayState).filter(Boolean).length;
+  document.getElementById('relay-summary').textContent=`${n}/8 relays closed`;
+  document.getElementById('relay-count').textContent=`${n} closed`;
+}
+
+async function toggleRelay(n){
+  const newState=(relayState[n]||false)?0:1;
+  const btn=document.getElementById('rly-'+n);
+  btn.disabled=true;btn.textContent='…';
+  try{
+    const r=await fetch(`/api/control/ipcp505/relay/${n}/set`,{
+      method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({state:newState})});
+    const j=await r.json();
+    if(j.ok){relayState[n]=newState===1;toast(`Relay ${n} ${newState?'closed':'opened'}`);}
+    else toast('Error: '+(j.error||'unknown'));
+  }catch(e){toast('Network error');}
+  buildRelayGrid();
+}
+
+// ── 12V power ────────────────────────────────────────────────────────────────
+function buildPwrGrid(){
+  const g=document.getElementById('pwr-grid');g.innerHTML='';
+  for(let i=1;i<=4;i++){
+    const on=pwrState[i]||false;
+    const d=document.createElement('div');d.className='pwr-card';
+    d.innerHTML=`<div class="pwr-lbl">PORT ${i}</div>
+      <div class="pwr-name">${PWR_NAMES[i]}</div>
+      <div class="pwr-btns">
+        <button class="pwr-on${on?' active':''}" onclick="setPwr(${i},1)">ON</button>
+        <button class="pwr-off${!on?' active':''}" onclick="setPwr(${i},0)">OFF</button>
+      </div>`;
+    g.appendChild(d);
+  }
+  const n=Object.values(pwrState).filter(Boolean).length;
+  document.getElementById('pwr-summary').textContent=`${n}/4 12V on`;
+  document.getElementById('pwr-count').textContent=`${n} on`;
+}
+
+async function setPwr(n,state){
+  try{
+    const r=await fetch(`/api/control/ipcp505/power/${n}/set`,{
+      method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({state})});
+    const j=await r.json();
+    if(j.ok){pwrState[n]=state===1;toast(`12V port ${n} ${state?'on':'off'}`);}
+    else toast('Error: '+(j.error||'unknown'));
+  }catch(e){toast('Network error');}
+  buildPwrGrid();
+}
+
+// ── COM port probe state ──────────────────────────────────────────────────────
+// probeState[port] = {model, device} from /api/control/ipcp505/com/scan
+let probeState={};
+
+// Known configured kind → expected part number prefixes
+const KIND_MODELS={
+  vtg400:['60-564-01','60-564-02','60-564-03'],
+  // add vsc700, usp405, vsc900 here as we learn their part numbers
+};
+
+function serialDotClass(p){
+  const probe=probeState[p.port];
+  if(!probe||probe.model===null) return '';          // no response — gray
+  if(!p.page){
+    // unconfigured port — something is there, highlight amber
+    return probe.model?'warn':'';
+  }
+  // configured — check if model matches expected kind
+  const expected=KIND_MODELS[p.kind]||[];
+  if(expected.length===0) return 'live';             // kind not yet in map, trust it
+  const match=expected.some(pn=>probe.model.includes(pn));
+  return match?'live':'mismatch';
+}
+
+// ── serial devices ────────────────────────────────────────────────────────────
+function buildSerialGrid(){
+  const g=document.getElementById('serial-grid');g.innerHTML='';
+  SERIAL_PORTS.forEach(p=>{
+    const probe=probeState[p.port];
+    const dotCls=serialDotClass(p);
+    const isMismatch=dotCls==='mismatch';
+    const isUnknown=dotCls==='warn';
+
+    let rightSide='';
+    if(isMismatch){
+      rightSide=`<span class="serial-btn mismatch" title="Wrong device: ${probe?.model||'?'}">⚠ Wrong device</span>`;
+    } else if(p.page){
+      rightSide=`<a href="${p.page}" class="serial-btn live">Control →</a>`;
+    } else if(isUnknown&&probe?.model){
+      if(probe?.device?.page){
+        rightSide=`<a href="${probe.device.page}" class="serial-btn found">${probe.device.name} →</a>`;
+      } else {
+        const devName=probe?.device?.name||probe.model;
+        rightSide=`<span class="serial-btn found" style="cursor:default">${devName} detected</span>`;
+      }
+    } else {
+      rightSide=`<span class="serial-btn soon">Soon™</span>`;
+    }
+
+    const d=document.createElement('div');
+    d.className='serial-card'+(isMismatch?' mismatch-card':'');
+    d.innerHTML=`
+      <div class="serial-dot ${dotCls}"></div>
+      <div class="serial-port">COM${p.port}</div>
+      <div class="serial-info">
+        <div class="serial-name">${p.name}</div>
+        <div class="serial-kind">${probe?.model?probe.model:p.kind}</div>
+      </div>
+      ${rightSide}`;
+    g.appendChild(d);
+
+    // Unconfigured port has something — toast once
+    if(isUnknown&&probe?.model&&!p._notified){
+      p._notified=true;
+      const devName=probe?.device?.name||probe.model;
+      toast(`COM${p.port}: ${devName} detected`,4000);
+    }
+  });
+}
+
+// ── COM port scan ─────────────────────────────────────────────────────────────
+async function probeCOMPorts(){
+  try{
+    const r=await fetch('/api/control/ipcp505/com/scan');
+    const j=await r.json();
+    if(j.error) return;
+    // j is {1:{model,device}, 2:…, …}
+    Object.entries(j).forEach(([port,info])=>{
+      probeState[parseInt(port)]=info;
+    });
+    buildSerialGrid();
+  }catch(e){}
+}
+
+// ── poll ─────────────────────────────────────────────────────────────────────
+async function pollState(){
+  try{
+    const r=await fetch('/api/control/ipcp505/state');
+    const j=await r.json();
+    const dot=document.getElementById('sdot');
+    const stxt=document.getElementById('stext');
+    if(j.error&&!j.online){
+      dot.className='sdot bad';stxt.textContent='Offline — '+j.error;
+    }else{
+      dot.className='sdot ok';stxt.textContent='Online';
+    }
+    (j.signals||[]).forEach((s,i)=>{relayState[i+1]=s.state==='ok';});
+    (j.rail_dots||[]).forEach((rd,i)=>{pwrState[i+1]=rd.state==='ok';});
+    buildRelayGrid();
+    buildPwrGrid();
+  }catch(e){document.getElementById('stext').textContent='Poll error';}
+}
+
+buildSerialGrid();
+buildRelayGrid();
+buildPwrGrid();
+pollState();
+probeCOMPorts();
+setInterval(pollState,15000);
+setInterval(probeCOMPorts,12000);
+</script>
+</body></html>"""
+
+
+# =========================================================================== #
+# VTG 400 Control  (/control/ipcp505/vtg400)
+# =========================================================================== #
+
+VTG400_HTML = r"""<!doctype html>
+<html lang="en"><head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>VTG 400 · Control</title>
+<style>
+:root{
+  --bg:#0c0e12;--panel:#15181f;--panel2:#1b1f28;--line:#262b36;
+  --ink:#e8ebf0;--muted:#8b93a3;--faint:#1f232d;
+  --ok:#34d399;--warn:#f5b942;--bad:#ff5470;--accent:#f5b942;
+  --mono:ui-monospace,"SF Mono","JetBrains Mono",Menlo,Consolas,monospace;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:var(--bg);color:var(--ink);font-family:var(--mono);
+  min-height:100dvh;padding-bottom:60px}
+header{display:flex;align-items:center;gap:14px;padding:14px 20px;
+  border-bottom:1px solid var(--line);
+  background:linear-gradient(180deg,rgba(245,185,66,.06),transparent)}
+.brand{font-size:18px;font-weight:800;letter-spacing:.08em;color:var(--accent)}
+.hdr-sub{font-size:12px;color:var(--muted)}
+.spacer{flex:1}
+.back-btn{font-family:var(--mono);font-size:12px;color:var(--muted);
+  background:none;border:1px solid var(--line);border-radius:6px;
+  padding:5px 12px;cursor:pointer;text-decoration:none}
+.back-btn:hover{color:var(--ink);border-color:var(--muted)}
+main{max-width:760px;margin:0 auto;padding:20px 16px;display:flex;flex-direction:column;gap:16px}
+
+.status-bar{display:flex;align-items:center;gap:10px;padding:8px 14px;
+  background:var(--panel);border:1px solid var(--line);border-radius:8px;
+  font-size:12px;color:var(--muted)}
+.sdot{width:7px;height:7px;border-radius:50%;background:var(--muted);flex-shrink:0}
+.sdot.ok{background:var(--ok)}
+.sdot.bad{background:var(--bad)}
+
+/* section card */
+.sec{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:16px}
+.sec-title{font-size:10.5px;letter-spacing:.12em;text-transform:uppercase;
+  color:var(--muted);margin-bottom:12px}
+
+/* power row */
+.pwr-row{display:flex;gap:10px}
+.btn-on{font-family:var(--mono);font-size:13px;font-weight:700;flex:1;padding:11px 0;
+  border-radius:8px;cursor:pointer;border:1px solid rgba(52,211,153,.35);
+  background:rgba(52,211,153,.1);color:var(--ok);transition:all .15s}
+.btn-on:hover{background:rgba(52,211,153,.22)}
+.btn-off{font-family:var(--mono);font-size:13px;font-weight:700;flex:1;padding:11px 0;
+  border-radius:8px;cursor:pointer;border:1px solid rgba(255,84,112,.35);
+  background:rgba(255,84,112,.08);color:var(--bad);transition:all .15s}
+.btn-off:hover{background:rgba(255,84,112,.18)}
+
+/* pattern/resolution grids */
+.btn-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:7px}
+.btn-grid.wide{grid-template-columns:repeat(4,1fr)}
+.grid-btn{font-family:var(--mono);font-size:12px;padding:9px 6px;
+  border-radius:7px;cursor:pointer;border:1px solid var(--line);
+  background:var(--panel2);color:var(--muted);transition:all .15s;text-align:center}
+.grid-btn:hover{color:var(--ink);border-color:var(--muted)}
+.grid-btn.active{background:rgba(245,185,66,.12);color:var(--accent);
+  border-color:rgba(245,185,66,.45)}
+
+/* IRE row */
+.ire-row{display:flex;flex-wrap:wrap;gap:6px}
+.ire-btn{font-family:var(--mono);font-size:11.5px;padding:7px 10px;
+  border-radius:6px;cursor:pointer;border:1px solid var(--line);
+  background:var(--panel2);color:var(--muted);transition:all .15s;min-width:44px;text-align:center}
+.ire-btn:hover{color:var(--ink);border-color:var(--muted)}
+.ire-btn.active{background:rgba(245,185,66,.12);color:var(--accent);
+  border-color:rgba(245,185,66,.45)}
+
+/* color grid */
+.color-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:7px}
+.color-btn{font-family:var(--mono);font-size:12px;font-weight:600;
+  padding:10px 4px;border-radius:7px;cursor:pointer;
+  border:2px solid transparent;transition:all .15s;text-align:center}
+.color-btn.active{border-color:#fff !important;box-shadow:0 0 12px rgba(255,255,255,.25)}
+.cb-black{background:#111;color:#aaa}
+.cb-red{background:#c00;color:#fff}
+.cb-green{background:#0a0;color:#fff}
+.cb-blue{background:#00a;color:#fff}
+.cb-white{background:#eee;color:#111}
+.cb-magenta{background:#a0a;color:#fff}
+.cb-yellow{background:#880;color:#111}
+.cb-cyan{background:#088;color:#fff}
+
+/* info strip */
+.info-strip{display:flex;gap:20px;flex-wrap:wrap}
+.info-item{display:flex;flex-direction:column;gap:2px}
+.info-lbl{font-size:10px;letter-spacing:.1em;text-transform:uppercase;color:var(--muted)}
+.info-val{font-size:14px;font-weight:600;color:var(--ink)}
+
+.toast{position:fixed;bottom:20px;left:50%;transform:translateX(-50%);
+  background:var(--panel2);border:1px solid var(--line);border-radius:8px;
+  padding:8px 18px;font-size:12px;opacity:0;transition:opacity .25s;
+  pointer-events:none;z-index:100;white-space:nowrap}
+.toast.show{opacity:1}
+@media(max-width:520px){
+  .btn-grid.wide{grid-template-columns:repeat(2,1fr)}
+  .color-grid{grid-template-columns:repeat(4,1fr)}
+}
+</style></head>
+<body>
+<header>
+  <span class="brand">VTG 400</span>
+  <span class="hdr-sub">Test Pattern Generator · COM8</span>
+  <span class="spacer"></span>
+  <a href="/control/ipcp505" class="back-btn">← IPCP Hub</a>
+</header>
+<main>
+  <!-- status -->
+  <div class="status-bar">
+    <div class="sdot" id="sdot"></div>
+    <span id="stext">Connecting…</span>
+    <span class="spacer"></span>
+    <span id="model-txt" style="color:var(--ink)"></span>
+    <span style="color:var(--line);padding:0 8px">|</span>
+    <span id="temp-txt"></span>
+  </div>
+
+  <!-- power -->
+  <div class="sec">
+    <div class="sec-title">Power</div>
+    <div class="pwr-row">
+      <button class="btn-on" onclick="cmd('1P')">⏻ Power On</button>
+      <button class="btn-off" onclick="cmd('0P')">⏻ Power Off</button>
+    </div>
+  </div>
+
+  <!-- IRE -->
+  <div class="sec" id="sec-ire">
+    <div class="sec-title">IRE Level</div>
+    <div class="ire-row" id="ire-row"></div>
+  </div>
+
+  <!-- patterns -->
+  <div class="sec">
+    <div class="sec-title">Test Patterns</div>
+    <div class="btn-grid" id="pat-grid"></div>
+  </div>
+
+  <!-- colors -->
+  <div class="sec" id="sec-color">
+    <div class="sec-title">Color Field</div>
+    <div class="color-grid" id="color-grid"></div>
+  </div>
+
+  <!-- resolution -->
+  <div class="sec">
+    <div class="sec-title">Resolution / Format</div>
+    <div class="btn-grid wide" id="res-grid"></div>
+  </div>
+</main>
+<div class="toast" id="toast"></div>
+
+<script>
+const PATTERNS=[
+  {num:15,name:'Window 20'},{num:14,name:'Window 80'},{num:16,name:'Var IRE'},
+  {num:6,name:'4×4 Cross'},{num:7,name:'Coarse'},{num:8,name:'Fine Cross'},
+  {num:13,name:'Color Bar'},{num:17,name:'Full Screen'},{num:9,name:'PLUGE'},
+];
+const PATTERN_MAP={};
+PATTERNS.forEach(p=>PATTERN_MAP[p.num]=p.name);
+
+const COLORS=[
+  {name:'Black',cmd:'0*10#',cls:'cb-black'},
+  {name:'Red',  cmd:'4*10#',cls:'cb-red'},
+  {name:'Green',cmd:'2*10#',cls:'cb-green'},
+  {name:'Blue', cmd:'1*10#',cls:'cb-blue'},
+  {name:'White',cmd:'7*10#',cls:'cb-white'},
+  {name:'Magenta',cmd:'5*10#',cls:'cb-magenta'},
+  {name:'Yellow',cmd:'6*10#',cls:'cb-yellow'},
+  {name:'Cyan', cmd:'3*10#',cls:'cb-cyan'},
+];
+
+const RESOLUTIONS=[
+  {lbl:'240p', cmd:'001*99='},
+  {lbl:'NTSC/U',cmd:'001*07='},
+  {lbl:'NTSC/J',cmd:'002*07='},
+  {lbl:'PAL',  cmd:'003*07='},
+  {lbl:'480p', cmd:'001*06='},
+  {lbl:'576p', cmd:'002*06='},
+  {lbl:'720p', cmd:'004*06='},
+  {lbl:'1080i',cmd:'010*06='},
+];
+const RES_MAP={};
+RESOLUTIONS.forEach(r=>RES_MAP[r.cmd.replace(/=$/,'')]=r.lbl);
+
+let activeIre=null, activePat=null, activeColor=null, activeRes=null;
+let _tt;
+function toast(msg,dur=2400){
+  const el=document.getElementById('toast');
+  el.textContent=msg;el.classList.add('show');
+  clearTimeout(_tt);_tt=setTimeout(()=>el.classList.remove('show'),dur);
+}
+
+async function cmd(vtgCmd, label=''){
+  try{
+    const r=await fetch('/api/control/ipcp505/vtg400/cmd',{
+      method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({cmd:vtgCmd})});
+    const j=await r.json();
+    if(!j.ok) toast('Error: '+(j.error||'failed'));
+    else if(label) toast(label);
+  }catch(e){toast('Network error');}
+}
+
+// ── IRE ──────────────────────────────────────────────────────────────────────
+function buildIre(){
+  const row=document.getElementById('ire-row');
+  row.innerHTML='';
+  for(let v=0;v<=100;v+=10){
+    const b=document.createElement('button');
+    b.className='ire-btn'+(activeIre===v?' active':'');
+    b.textContent=v;
+    b.onclick=()=>{ activeIre=v; buildIre(); cmd(`${v}*15#`,`IRE ${v}`); };
+    row.appendChild(b);
+  }
+}
+
+// ── Patterns ─────────────────────────────────────────────────────────────────
+function buildPatterns(){
+  const g=document.getElementById('pat-grid');
+  g.innerHTML='';
+  PATTERNS.forEach(p=>{
+    const b=document.createElement('button');
+    b.className='grid-btn'+(activePat===p.num?' active':'');
+    b.textContent=p.name;
+    b.onclick=()=>{ activePat=p.num; buildPatterns(); cmd(`${p.num}J`,p.name); };
+    g.appendChild(b);
+  });
+}
+
+// ── Colors ───────────────────────────────────────────────────────────────────
+function buildColors(){
+  const g=document.getElementById('color-grid');
+  g.innerHTML='';
+  COLORS.forEach(c=>{
+    const b=document.createElement('button');
+    b.className=`color-btn ${c.cls}`+(activeColor===c.name?' active':'');
+    b.textContent=c.name;
+    b.onclick=()=>{ activeColor=c.name; buildColors(); cmd(c.cmd,c.name); };
+    g.appendChild(b);
+  });
+}
+
+// ── Resolution ───────────────────────────────────────────────────────────────
+function buildRes(){
+  const g=document.getElementById('res-grid');
+  g.innerHTML='';
+  RESOLUTIONS.forEach(r=>{
+    const b=document.createElement('button');
+    b.className='grid-btn'+(activeRes===r.lbl?' active':'');
+    b.textContent=r.lbl;
+    b.onclick=()=>{ activeRes=r.lbl; buildRes(); cmd(r.cmd,r.lbl); };
+    g.appendChild(b);
+  });
+}
+
+// ── Wrong-device overlay ──────────────────────────────────────────────────────
+const VTG_MODELS={'60-564-01':'VTG 400','60-564-02':'VTG 400D','60-564-03':'VTG 400DVI'};
+function isVtgModel(raw){ return Object.keys(VTG_MODELS).some(k=>raw.includes(k)); }
+
+function showWrongDevice(foundRaw){
+  let overlay=document.getElementById('wrong-overlay');
+  if(!overlay){
+    overlay=document.createElement('div');
+    overlay.id='wrong-overlay';
+    overlay.style.cssText=`position:fixed;inset:0;background:rgba(8,10,14,.92);
+      display:flex;flex-direction:column;align-items:center;justify-content:center;
+      z-index:100;gap:12px;font-family:var(--mono)`;
+    document.body.appendChild(overlay);
+  }
+  const label=foundRaw&&foundRaw.length>0&&foundRaw!=='E10'
+    ?`Found: <span style="color:var(--warn)">${foundRaw}</span>`
+    :`<span style="color:var(--muted)">No response from COM8</span>`;
+  overlay.innerHTML=`
+    <div style="font-size:28px">⚠️</div>
+    <div style="font-size:16px;font-weight:700;color:var(--bad)">Wrong device on COM8</div>
+    <div style="font-size:13px;color:var(--muted)">Expected: <span style="color:var(--ink)">VTG 400 / 400D / 400DVI</span></div>
+    <div style="font-size:13px">${label}</div>
+    <div style="font-size:11px;color:var(--muted);margin-top:8px">Polling every 10s — plug in a VTG 400 to continue</div>`;
+}
+
+function hideWrongDevice(){
+  const o=document.getElementById('wrong-overlay');
+  if(o) o.remove();
+}
+
+// ── State poll ────────────────────────────────────────────────────────────────
+async function pollState(){
+  const dot=document.getElementById('sdot');
+  const stxt=document.getElementById('stext');
+  try{
+    const r=await fetch('/api/control/ipcp505/vtg400/state');
+    const j=await r.json();
+    if(j.error){
+      dot.className='sdot bad';stxt.textContent='Serial error — '+j.error;
+      showWrongDevice('');return;
+    }
+
+    // model check — if not a VTG 400, show overlay and keep polling
+    const modelRaw=(j.model||'').trim();
+    if(!isVtgModel(modelRaw)){
+      dot.className='sdot bad';stxt.textContent='Wrong device';
+      showWrongDevice(modelRaw);return;
+    }
+
+    hideWrongDevice();
+    dot.className='sdot ok';stxt.textContent='Online';
+
+    const isDVI=modelRaw.includes('60-564-03');
+    const modelName=VTG_MODELS[Object.keys(VTG_MODELS).find(k=>modelRaw.includes(k))]||modelRaw;
+    document.getElementById('model-txt').textContent=modelName;
+
+    // temp
+    const tm=(j.temp||'').match(/([+-]?\d+\.?\d*)F/);
+    document.getElementById('temp-txt').textContent=tm?`${parseFloat(tm[1]).toFixed(0)}°F`:'';
+
+    // IRE
+    if(j.ire&&/^\d+$/.test(j.ire.trim())){
+      const v=parseInt(j.ire.trim());
+      if(v>=0&&v<=100){ activeIre=Math.round(v/10)*10; buildIre(); }
+    }
+    // Pattern
+    if(j.pattern&&/^\d+$/.test(j.pattern.trim())){
+      const pn=parseInt(j.pattern.trim());
+      if(PATTERN_MAP[pn]){ activePat=pn; buildPatterns(); }
+    }
+    // Resolution
+    if(j.resolution){
+      const m=j.resolution.match(/(\d+\*\d+)/);
+      if(m&&RES_MAP[m[1]]){ activeRes=RES_MAP[m[1]]; buildRes(); }
+    }
+  }catch(e){
+    dot.className='sdot bad';stxt.textContent='Poll error';
+  }
+}
+
+// ── init ──────────────────────────────────────────────────────────────────────
+buildIre();buildPatterns();buildColors();buildRes();
+pollState();
+setInterval(pollState,10000);
+</script>
+</body></html>"""
+
+
+# ── IPCP 505 API endpoints ──────────────────────────────────────────────────
+
+@app.get("/control/ipcp505", response_class=HTMLResponse)
+def control_ipcp505_page():
+    return HTMLResponse(IPCP505_HTML)
+
+
+@app.get("/control/ipcp505/vtg400", response_class=HTMLResponse)
+def control_vtg400_page():
+    return HTMLResponse(VTG400_HTML)
+
+
+@app.get("/api/control/ipcp505/state")
+def ipcp505_state():
+    dev = _ipcp505_device()
+    if not dev:
+        return JSONResponse({"error": "IPCP 505 not configured", "online": False}, status_code=404)
+    online, replies, err = sis.query_ipcp505(dev["ip"], int(dev.get("port", 23)))
+    result = sis.parse_ipcp505(replies)
+    return JSONResponse({
+        "online":    online,
+        "error":     err,
+        "signals":   result["signals"],
+        "rail_dots": result["rail_dots"],
+        "details":   result["details"],
+        "summary":   result["summary"],
+    })
+
+
+@app.post("/api/control/ipcp505/relay/{n}/set")
+async def ipcp505_relay_set(n: int, request: Request):
+    body  = await request.json()
+    state = int(body.get("state", 0))
+    if n < 1 or n > 8 or state not in (0, 1):
+        return JSONResponse({"error": "Invalid relay or state"}, status_code=400)
+    dev = _ipcp505_device()
+    if not dev:
+        return JSONResponse({"error": "IPCP 505 not configured"}, status_code=404)
+    cmd_b = f"{n:02d}*{state}O\r".encode("ascii")
+    resp, err = _ipcp505_send(dev["ip"], int(dev.get("port", 23)), cmd_b)
+    action = "close" if state else "open"
+    log(f"IPCP505 relay {n} {action}  resp={resp!r}  err={err}")
+    return JSONResponse({"ok": err is None, "response": resp, "error": err})
+
+
+@app.post("/api/control/ipcp505/power/{n}/set")
+async def ipcp505_power_set(n: int, request: Request):
+    body  = await request.json()
+    state = int(body.get("state", 0))
+    if n < 1 or n > 4 or state not in (0, 1):
+        return JSONResponse({"error": "Invalid port or state"}, status_code=400)
+    dev = _ipcp505_device()
+    if not dev:
+        return JSONResponse({"error": "IPCP 505 not configured"}, status_code=404)
+    cmd_b = f"\x1bP{n}*{state}DCPP\r".encode("ascii")
+    resp, err = _ipcp505_send(dev["ip"], int(dev.get("port", 23)), cmd_b)
+    log(f"IPCP505 12V port {n} {'on' if state else 'off'}  resp={resp!r}  err={err}")
+    return JSONResponse({"ok": err is None, "response": resp, "error": err})
+
+
+@app.post("/api/control/ipcp505/vtg400/cmd")
+async def ipcp505_vtg400_cmd(request: Request):
+    body = await request.json()
+    vtg_cmd = str(body.get("cmd", "")).strip()
+    if not vtg_cmd:
+        return JSONResponse({"error": "cmd required"}, status_code=400)
+    dev = _ipcp505_device()
+    if not dev:
+        return JSONResponse({"error": "IPCP 505 not configured"}, status_code=404)
+    resp, err = _vtg400_send(dev["ip"], vtg_cmd)
+    log(f"VTG400 cmd {vtg_cmd!r}  resp={resp!r}  err={err}")
+    return JSONResponse({"ok": err is None, "response": resp, "error": err})
+
+
+@app.get("/api/control/ipcp505/vtg400/state")
+def ipcp505_vtg400_state():
+    dev = _ipcp505_device()
+    if not dev:
+        return JSONResponse({"error": "IPCP 505 not configured"}, status_code=404)
+    results, err = _vtg400_query_all(dev["ip"])
+    if err and not results:
+        return JSONResponse({"error": err})
+    results["error"] = err
+    return JSONResponse(results)
+
+
+@app.get("/api/control/ipcp505/com/{port}/probe")
+def ipcp505_com_probe(port: int):
+    """Query N (model/part number) on any IPCP COM port via its TCP aux port (2000+port)."""
+    if port < 1 or port > 8:
+        return JSONResponse({"error": "port must be 1-8"}, status_code=400)
+    dev = _ipcp505_device()
+    if not dev:
+        return JSONResponse({"error": "IPCP 505 not configured"}, status_code=404)
+    import socket as _s
+    tcp_port = 2000 + port
+    try:
+        sock = _s.create_connection((dev["ip"], tcp_port), timeout=4.0)
+    except (OSError, _s.timeout) as e:
+        return JSONResponse({"port": port, "model": None, "error": str(e)})
+    try:
+        sock.sendall(b"N\r")
+        raw = sis._read(sock, 1.5, idle=0.3).strip()
+        return JSONResponse({"port": port, "model": raw or None, "error": None})
+    except OSError as e:
+        return JSONResponse({"port": port, "model": None, "error": str(e)})
+    finally:
+        try: sock.close()
+        except OSError: pass
+
+
+# Known part-number → device info mapping for auto-detection
+COM_DEVICE_MAP = {
+    "60-564-01": {"name": "VTG 400",    "page": "/control/ipcp505/vtg400"},
+    "60-564-02": {"name": "VTG 400D",   "page": "/control/ipcp505/vtg400"},
+    "60-564-03": {"name": "VTG 400DVI", "page": "/control/ipcp505/vtg400"},
+    "60-369-04": {"name": "USP 405",    "page": None},   # page coming soon
+    # Add VSC 700D, VSC 900D part numbers here as we build their pages
+}
+
+@app.get("/api/control/ipcp505/com/scan")
+def ipcp505_com_scan():
+    """Probe all 8 COM ports and return detected device info."""
+    dev = _ipcp505_device()
+    if not dev:
+        return JSONResponse({"error": "IPCP 505 not configured"}, status_code=404)
+    import socket as _s
+    results = {}
+    for port in range(1, 9):
+        tcp_port = 2000 + port
+        try:
+            sock = _s.create_connection((dev["ip"], tcp_port), timeout=3.0)
+            sock.sendall(b"N\r")
+            raw = sis._read(sock, 1.2, idle=0.3).strip()
+            sock.close()
+        except Exception:
+            raw = None
+        info = None
+        if raw:
+            for pn, d in COM_DEVICE_MAP.items():
+                if pn in raw:
+                    info = d
+                    break
+        results[str(port)] = {"model": raw or None, "device": info}
+    return JSONResponse(results)
 
 
 if __name__ == "__main__":
