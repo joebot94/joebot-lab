@@ -112,7 +112,12 @@ def poll_device(d):
             res["raw"] = replies
             return res
 
-        cmds = sis.COMMANDS.get(kind, ["I"])
+        cmds = list(sis.COMMANDS.get(kind, ["I"]))
+        if kind == "smx":
+            # Add 0LS (video) and 4LS (audio) for each configured slot
+            for slot, meta in sorted(dev_cfg.SMX_SLOTS.items()):
+                cmds.append(meta["ls_cmd"])           # e.g. "10*0LS"
+                cmds.append(f"{slot}*4LS")            # audio fallback
         online, replies, err = sis.query(
             ip, port, cmds, timeout=SOCK_TIMEOUT, password=d.get("password"))
         if not online:

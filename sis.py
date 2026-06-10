@@ -401,20 +401,20 @@ def parse_smx(replies, slot_meta):
     meta_by_slot = slot_meta or {}
 
     for slot in range(1, 13):
-        audio_mode = False
-        ls_raw = _digits(replies.get(f"{slot}*0LS", ""))
+        meta = meta_by_slot.get(slot, {})
+        label = meta.get("label", f"Slot {slot}")
+        plane = meta.get("plane", "??")
+        # Detect audio cards by label — audio LS detection via 0LS is unreliable
+        audio_mode = "audio" in label.lower()
+
+        ls_raw = _digits(replies.get(f"{slot}*0LS", "")
+                         or replies.get(meta.get("ls_cmd", ""), ""))
         if not ls_raw:
-            # Try audio LS — audio cards don't respond to 0LS
             ls_raw = _digits(replies.get(f"{slot}*4LS", ""))
-            if ls_raw:
-                audio_mode = True
         if not ls_raw:
             continue   # no card in this slot
 
         seen_slots.add(slot)
-        meta = meta_by_slot.get(slot, {})
-        label = meta.get("label", f"Slot {slot}")
-        plane = meta.get("plane", "??")
 
         if audio_mode:
             # Audio cards: signal presence detection is unreliable via LS;
@@ -785,10 +785,9 @@ def parse_ipcp505(replies, serial_ports=None):
 COMMANDS = {
     "matrix12800": ["0*01S", "0*02S", "0*03S", "0*04S", "0*05S", "I"],
     "dms3600":     ["S", "I", "0LS", "N", "Q"],
-    # Poll slots 1-12 with 0LS (video/signal) and 4LS (audio level-sense).
-    # parse_smx detects which slots actually responded with valid data.
-    "smx":         ["S", "I"] + [f"{n}*0LS" for n in range(1, 13)]
-                               + [f"{n}*4LS" for n in range(1, 13)],
+    # Base SMX queries — slot LS commands are added dynamically in poll_device
+    # based on SMX_SLOTS so we only query slots that are actually installed.
+    "smx":         ["S", "I"],
     "mgp":         ["I", "1I", "2I", "N", "20S", "1*I", "2*I", "3*I", "4*I"],
     "pcs4":        ["2PC", "2PS"],
     "extron_info": ["I", "N", "Q"],
