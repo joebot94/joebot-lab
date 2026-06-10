@@ -37,7 +37,7 @@ import modules_store
 # --------------------------------------------------------------------------- #
 # Config
 # --------------------------------------------------------------------------- #
-VERSION = "2.5.0"   # bump this on every deploy so you can confirm the new code is running
+VERSION = "2.6.0"   # bump this on every deploy so you can confirm the new code is running
 
 PORT          = int(os.getenv("DASHBOARD_PORT", "8080"))
 POLL_SECONDS  = int(os.getenv("POLL_SECONDS", "10"))
@@ -1518,12 +1518,14 @@ from routes_mtx_config import router as _mtx_config_router
 from routes_matrix12800 import router as _matrix12800_router
 from routes_smx        import router as _smx_router
 from routes_ipcp505    import router as _ipcp505_router
+from routes_ir         import router as _ir_router
 
 app.include_router(_dms_router)
 app.include_router(_mtx_config_router)
 app.include_router(_matrix12800_router)
 app.include_router(_smx_router)
 app.include_router(_ipcp505_router)
+app.include_router(_ir_router)
 
 
 if __name__ == "__main__":
