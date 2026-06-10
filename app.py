@@ -5913,26 +5913,39 @@ def _usp405_send(ip: str, com_port: int, usp_cmd: str, timeout: float = 5.0):
         return "", str(e)
 
 
-def _usp405_query_all(ip: str, com_port: int, timeout: float = 18.0):
-    """Query all USP 405 state via TCP direct (no * chars in any query command)."""
+_USP405_FAST_QUERIES = [
+    # Runs every poll — everything visible in status bar + Signal/Picture/Output tabs
+    ("info",      "I"),   ("outrate",   "="),   ("in2type",   "\\"),
+    ("brightness","Y"),   ("contrast",  "^"),   ("color",     "C"),
+    ("tint",      "T"),   ("freeze",    "F"),   ("testpat",   "J"),
+]
+_USP405_SLOW_QUERIES = [
+    # Runs every 4th poll — advanced settings that rarely change
+    ("firmware",   "Q"),   ("model",     "N"),   ("exemode",   "X"),
+    ("hdetail",    "D"),   ("vdetail",   "d"),
+    ("top_blank",  "("),   ("bot_blank", ")"),
+    ("enc_filter", "10#"), ("blue_scr",  "8#"),  ("edge_smth", "16#"),
+    ("enhanced",   "12#"), ("pal_film",  "18#"), ("out_sig",   "6#"),
+    ("polarity",   "7#"),  ("rgb_delay", "3#"),
+]
+_usp405_slow_counter: dict[int, int] = {}   # com_port → poll count
+
+
+def _usp405_query_all(ip: str, com_port: int, timeout: float = 12.0):
+    """Query USP 405 state via TCP direct.
+    Fast queries run every call (~9 × 0.2s ≈ 2s).
+    Slow queries (advanced settings) run every 4th call to cut idle time.
+    """
     import socket as _s
+    _usp405_slow_counter[com_port] = (_usp405_slow_counter.get(com_port, 0) + 1)
+    run_slow = (_usp405_slow_counter[com_port] % 4) == 1  # 1st, 5th, 9th …
+    queries = _USP405_FAST_QUERIES + (_USP405_SLOW_QUERIES if run_slow else [])
+
     tcp_port = 2000 + com_port
     try:
         sock = _s.create_connection((ip, tcp_port), timeout=timeout)
     except (OSError, _s.timeout) as e:
         return {}, str(e)
-    # Note: "\\" is a one-backslash Python string — the Input 2 type query command
-    queries = [
-        ("info",       "I"),    ("firmware",   "Q"),    ("model",      "N"),
-        ("in2type",    "\\"),   ("color",      "C"),    ("tint",       "T"),
-        ("contrast",   "^"),    ("brightness", "Y"),    ("freeze",     "F"),
-        ("testpat",    "J"),    ("exemode",    "X"),    ("outrate",    "="),
-        ("hdetail",    "D"),    ("vdetail",    "d"),
-        ("top_blank",  "("),    ("bot_blank",  ")"),
-        ("enc_filter", "10#"),  ("blue_scr",   "8#"),   ("edge_smth",  "16#"),
-        ("enhanced",   "12#"),  ("pal_film",   "18#"),  ("out_sig",    "6#"),
-        ("polarity",   "7#"),   ("rgb_delay",  "3#"),
-    ]
     results = {}
     try:
         for key, cmd in queries:
