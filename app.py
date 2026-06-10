@@ -1353,7 +1353,7 @@ function devBody(d){
     });}
   (d.boards||[]).forEach(b=>{
     if(b.audio){
-      h+=`<div class="board"><div class="bname">Slot ${b.slot} · ${esc(b.label)} · <span style="color:var(--muted);font-style:italic">audio — ${b.port_count||'?'} ports</span></div></div>`;
+      h+=`<div class="board"><div class="bname">Slot ${b.slot} · ${esc(b.label)} · <span style="color:var(--muted);font-style:italic">audio</span></div></div>`;
     } else {
       const act=b.signals.filter(s=>s.state!=="gray").length;
       h+=`<div class="board"><div class="bname">Slot ${b.slot} · plane ${b.plane} · ${esc(b.label)} (${act}/${b.signals.length})</div><div class="sigrow">`;
