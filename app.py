@@ -6096,6 +6096,7 @@ select:focus{border-color:var(--accent)}
   <div class="port-pick">
     <button class="port-btn" id="pb5" onclick="switchPort(5)">COM 5</button>
     <button class="port-btn" id="pb6" onclick="switchPort(6)">COM 6</button>
+    <button class="port-btn" id="pb7" onclick="switchPort(7)">COM 7</button>
   </div>
   <div class="spacer"></div>
   <a class="back-btn" href="/control/ipcp505">← IPCP 505</a>
@@ -6490,7 +6491,7 @@ let slTimers  = {};
 // ─── Init ─────────────────────────────────────────────────────────────────────
 function init(){
   const p = parseInt(new URLSearchParams(location.search).get('port') || '5');
-  currentPort = (p === 6) ? 6 : 5;
+  currentPort = (p >= 1 && p <= 8) ? p : 5;
   updatePortBtns();
   pollState();
   pollTimer = setInterval(pollState, 8000);
@@ -6508,8 +6509,10 @@ function switchPort(p){
 }
 
 function updatePortBtns(){
-  document.getElementById('pb5').classList.toggle('active', currentPort===5);
-  document.getElementById('pb6').classList.toggle('active', currentPort===6);
+  [5,6,7].forEach(p=>{
+    const e=document.getElementById('pb'+p);
+    if(e) e.classList.toggle('active', currentPort===p);
+  });
 }
 
 // ─── Tabs ─────────────────────────────────────────────────────────────────────
