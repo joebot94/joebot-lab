@@ -1520,6 +1520,7 @@ from routes_smx        import router as _smx_router
 from routes_ipcp505    import router as _ipcp505_router
 from routes_ir         import router as _ir_router
 from routes_vsc        import router as _vsc_router
+from routes_mtpx       import router as _mtpx_router
 
 app.include_router(_dms_router)
 app.include_router(_mtx_config_router)
@@ -1528,6 +1529,7 @@ app.include_router(_smx_router)
 app.include_router(_ipcp505_router)
 app.include_router(_ir_router)
 app.include_router(_vsc_router)
+app.include_router(_mtpx_router)
 
 
 if __name__ == "__main__":
