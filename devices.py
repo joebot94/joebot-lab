@@ -33,5 +33,10 @@ FAMILIES = [
 # Empty by default — add devices through the setup wizard or /config page
 DEVICES = []
 
-# Slot metadata for SMX boards — populated per-install via config
-SMX_SLOTS = {}
+# Slot metadata for SMX boards — physical cards installed in the chassis
+SMX_SLOTS = {
+    10: {"label": "VGA 16x16",         "plane": "00", "ls_cmd": "10*0LS"},
+    4:  {"label": "S-VIDEO DIN 16x16", "plane": "01", "ls_cmd": "4*0LS"},
+    2:  {"label": "VIDEO 16x16",       "plane": "02", "ls_cmd": "2*0LS"},
+    6:  {"label": "AUDIO 16x16",       "plane": "04", "ls_cmd": "6*0LS"},
+}
