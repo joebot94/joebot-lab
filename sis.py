@@ -388,31 +388,62 @@ def parse_smx(replies, slot_meta):
         status = "warn"
         details.append({"label": "Health", "value": "no S reading", "state": "warn"})
 
-    # Per-slot signal planes
+    # ── dynamic board discovery ──────────────────────────────────────────────
+    # We query n*0LS (video/signal presence) and n*4LS (audio level-sense)
+    # for slots 1-12. A slot with a card returns a non-empty digit string.
+    # Audio cards respond to 4LS rather than 0LS; detect by which one fires.
+    # Use slot_meta for human labels when available, fall back to "Slot N".
     boards = []
     total_active = 0
-    for slot in sorted(slot_meta):
-        meta = slot_meta[slot]
-        ls = _digits(replies.get(meta["ls_cmd"], ""))
-        dots = []
-        for i, c in enumerate(ls[:16], start=1):
-            # 0 none, 1/2 partial, 3 full
-            if c == "3":
-                st, on = "ok", True
-            elif c in "12":
-                st, on = "warn", True
-            else:
-                st, on = "gray", False
-            total_active += on
-            dots.append({"label": str(i), "state": st})
-        boards.append({
-            "slot": slot, "plane": meta["plane"], "label": meta["label"],
-            "signals": dots,
-        })
+    seen_slots = set()
 
-    summary = f"{len(slot_meta)} boards • {total_active} active signal(s)"
+    # Build label lookup from slot_meta (kept for backward compat)
+    meta_by_slot = slot_meta or {}
+
+    for slot in range(1, 13):
+        audio_mode = False
+        ls_raw = _digits(replies.get(f"{slot}*0LS", ""))
+        if not ls_raw:
+            # Try audio LS — audio cards don't respond to 0LS
+            ls_raw = _digits(replies.get(f"{slot}*4LS", ""))
+            if ls_raw:
+                audio_mode = True
+        if not ls_raw:
+            continue   # no card in this slot
+
+        seen_slots.add(slot)
+        meta = meta_by_slot.get(slot, {})
+        label = meta.get("label", f"Slot {slot}")
+        plane = meta.get("plane", "??")
+
+        if audio_mode:
+            # Audio cards: signal presence detection is unreliable via LS;
+            # show port count but mark as audio — no signal dots
+            n_ports = len(ls_raw)
+            boards.append({
+                "slot": slot, "plane": plane, "label": label,
+                "signals": [],   # no dots for audio
+                "audio": True, "port_count": n_ports,
+            })
+        else:
+            dots = []
+            for i, c in enumerate(ls_raw[:16], start=1):
+                if c == "3":
+                    st, on = "ok", True
+                elif c in "12":
+                    st, on = "warn", True
+                else:
+                    st, on = "gray", False
+                total_active += on
+                dots.append({"label": str(i), "state": st})
+            boards.append({
+                "slot": slot, "plane": plane, "label": label,
+                "signals": dots, "audio": False,
+            })
+
+    summary = f"{len(boards)} boards • {total_active} active signal(s)"
     if status == "bad":
-        summary = "PSU FAULT - " + summary
+        summary = "PSU FAULT — " + summary
     return {"status": status, "summary": summary, "details": details,
             "rail_dots": rail_dots, "boards": boards}
 
@@ -754,7 +785,10 @@ def parse_ipcp505(replies, serial_ports=None):
 COMMANDS = {
     "matrix12800": ["0*01S", "0*02S", "0*03S", "0*04S", "0*05S", "I"],
     "dms3600":     ["S", "I", "0LS", "N", "Q"],
-    "smx":         ["S", "I", "2*0LS", "4*0LS", "6*0LS", "10*0LS"],
+    # Poll slots 1-12 with 0LS (video/signal) and 4LS (audio level-sense).
+    # parse_smx detects which slots actually responded with valid data.
+    "smx":         ["S", "I"] + [f"{n}*0LS" for n in range(1, 13)]
+                               + [f"{n}*4LS" for n in range(1, 13)],
     "mgp":         ["I", "1I", "2I", "N", "20S", "1*I", "2*I", "3*I", "4*I"],
     "pcs4":        ["2PC", "2PS"],
     "extron_info": ["I", "N", "Q"],

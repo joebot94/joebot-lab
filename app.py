@@ -123,6 +123,7 @@ def poll_device(d):
         elif kind == "dms3600":
             res = sis.parse_dms3600(replies)
         elif kind == "smx":
+            # slot_meta from devices.py used for human labels; discovery is dynamic
             res = sis.parse_smx(replies, dev_cfg.SMX_SLOTS)
         elif kind == "mgp":
             res = sis.parse_mgp(replies)
@@ -1346,10 +1347,14 @@ function devBody(d){
       h+='</div>';
     });}
   (d.boards||[]).forEach(b=>{
-    const act=b.signals.filter(s=>s.state!=="gray").length;
-    h+=`<div class="board"><div class="bname">Slot ${b.slot} · plane ${b.plane} · ${esc(b.label)} (${act}/${b.signals.length})</div><div class="sigrow">`;
-    b.signals.forEach(s=>h+=`<span class="sig s-${s.state}" title="${esc(s.label)}"></span>`);
-    h+=`</div></div>`;});
+    if(b.audio){
+      h+=`<div class="board"><div class="bname">Slot ${b.slot} · ${esc(b.label)} · <span style="color:var(--muted);font-style:italic">audio — ${b.port_count||'?'} ports</span></div></div>`;
+    } else {
+      const act=b.signals.filter(s=>s.state!=="gray").length;
+      h+=`<div class="board"><div class="bname">Slot ${b.slot} · plane ${b.plane} · ${esc(b.label)} (${act}/${b.signals.length})</div><div class="sigrow">`;
+      b.signals.forEach(s=>h+=`<span class="sig s-${s.state}" title="${esc(s.label)}"></span>`);
+      h+=`</div></div>`;
+    }});
   if(Object.keys(d.meta||{}).length){
     for(const k in d.meta)
       h+=`<div class="kv"><span class="k">${esc(k)}</span><span class="val">${esc(d.meta[k])}</span></div>`;}
