@@ -311,6 +311,12 @@ main{max-width:960px;margin:0 auto;padding:20px 16px;
     </div>
     <div class="sec-body">
       <div class="serial-grid" id="serial-grid"></div>
+      <div style="margin-top:10px;text-align:right">
+        <a href="/control/ipcp505/vscquad?ports=1,2,3,4&model=700"
+           style="display:inline-flex;align-items:center;gap:6px;background:#7c3aed;color:#fff;padding:7px 16px;border-radius:8px;font-size:.82rem;font-weight:700;text-decoration:none">
+          ⊕ VSC 700D Quad View →
+        </a>
+      </div>
     </div>
   </div>
 </main>
