@@ -5353,7 +5353,13 @@ function buildSerialGrid(){
     if(isMismatch){
       rightSide=`<span class="serial-btn mismatch" title="Wrong device: ${probe?.model||'?'}">⚠ Wrong device</span>`;
     } else if(p.page){
-      rightSide=`<a href="${p.page}" class="serial-btn live">Control →</a>`;
+      // Show link only if probe hasn't run yet OR probe confirmed a device is there
+      const probeRan = probeState[p.port] !== undefined;
+      if(probeRan && !probe?.model){
+        rightSide=`<a href="${p.page}" class="serial-btn soon" style="opacity:.4">No response</a>`;
+      } else {
+        rightSide=`<a href="${p.page}" class="serial-btn live">Control →</a>`;
+      }
     } else if(isUnknown&&probe?.model){
       if(probe?.device?.page){
         rightSide=`<a href="${probe.device.page}" class="serial-btn found">${probe.device.name} →</a>`;
@@ -5931,7 +5937,7 @@ def _usp405_query_all(ip: str, com_port: int, timeout: float = 18.0):
     try:
         for key, cmd in queries:
             sock.sendall((cmd + "\r").encode("ascii"))
-            results[key] = sis._read(sock, 1.5, idle=0.4).strip()
+            results[key] = sis._read(sock, 1.0, idle=0.2).strip()
     except OSError as e:
         results["_error"] = str(e)
     finally:
@@ -6336,7 +6342,7 @@ select:focus{border-color:var(--accent)}
       <select id="sel-rate" onchange="applyOutputRate()">
         <option value="0">50 Hz</option>
         <option value="1">56 Hz (1280×768)</option>
-        <option value="2">60 Hz</option>
+        <option value="2" selected>60 Hz</option>
         <option value="3">75 Hz</option>
         <option value="4">85 Hz (1024×768)</option>
         <option value="5">AFL / Frame Lock</option>
@@ -6665,12 +6671,13 @@ function setTog(id, raw, re){
 
 // ─── Commands ─────────────────────────────────────────────────────────────────
 function selectInput(n){
-  sendCmd(n + '!');
+  // Optimistic UI update immediately
   for(let i=1;i<=5;i++){
     const e=document.getElementById('inp'+i);
     if(e) e.classList.toggle('active', i===n);
   }
   setText('preset-inp-lbl', n);
+  sendCmd(n + '!').then(()=> setTimeout(pollState, 1200));
 }
 
 function setIn2Type(v){ sendCmd(v + BS); }
@@ -6709,6 +6716,7 @@ function stepDetail(axis, dir){
 function applyOutputRate(){
   const res  = document.getElementById('sel-res').value;
   const rate = document.getElementById('sel-rate').value;
+  if(res === '' || rate === '') return;  // don't send if either is unset
   sendCmd(res + '*' + rate + '=');
 }
 
