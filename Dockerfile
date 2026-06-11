@@ -5,7 +5,7 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY app.py shared.py devices.py sis.py config_store.py dms_control.py dms_names.py mtx_engine.py matrix12800_control.py matrix12800_names.py smx_control.py smx_names.py modules_store.py routes_dms.py routes_mtx_config.py routes_matrix12800.py routes_smx.py routes_ipcp505.py routes_ir.py ir_store.py routes_vsc.py routes_mtpx.py ./
+COPY app.py shared.py devices.py sis.py config_store.py dms_control.py dms_names.py mtx_engine.py matrix12800_control.py matrix12800_names.py smx_control.py smx_names.py modules_store.py routes_dms.py routes_mtx_config.py routes_matrix12800.py routes_smx.py routes_ipcp505.py routes_ir.py ir_store.py routes_vsc.py routes_mtpx.py routes_dsc401.py ./
 
 ENV DASHBOARD_PORT=8080 \
     POLL_SECONDS=10 \
