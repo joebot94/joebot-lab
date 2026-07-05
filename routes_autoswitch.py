@@ -65,6 +65,30 @@ def _save(data: dict):
             json.dump(data, f, indent=2)
 
 
+# Engine runtime state (last fired event) — persisted separately from config
+# so it survives container rebuilds/redeploys.
+STATE_PATH = os.path.join(CONFIG_DIR, "autoswitch_state.json")
+
+
+def _load_state() -> dict:
+    try:
+        if os.path.exists(STATE_PATH):
+            with open(STATE_PATH) as f:
+                return json.load(f)
+    except Exception:
+        pass
+    return {}
+
+
+def _save_state(data: dict):
+    try:
+        os.makedirs(CONFIG_DIR, exist_ok=True)
+        with open(STATE_PATH, "w") as f:
+            json.dump(data, f)
+    except Exception as e:
+        log(f"autoswitch: state save failed: {e}")
+
+
 # --------------------------------------------------------------------------- #
 # SMX connection (persistent per-device, reconnects automatically)
 # --------------------------------------------------------------------------- #
@@ -162,11 +186,17 @@ class _Engine:
         self._active: Dict[str, Set[int]] = {}
         # dest_id → source_id currently routed there (for keep_current mode)
         self._current_route: Dict[str, str] = {}
+        # device_id → True (responding) / False (unreachable) / absent (never polled)
+        self._device_ok: Dict[str, bool] = {}
         # Status
         self.poll_count = 0
         self.last_event: Optional[str] = None
         self.last_event_time: Optional[float] = None
         self.recent_errors: List[str] = []
+        # Restore last-fired across restarts/redeploys
+        st = _load_state()
+        self.last_event = st.get("last_event")
+        self.last_event_time = st.get("last_event_time")
 
     # ── connection management ────────────────────────────────────────────────
 
@@ -221,25 +251,32 @@ class _Engine:
 
     # ── signal polling ───────────────────────────────────────────────────────
 
-    def _poll_active(self, device_id: str) -> Set[int]:
-        """Return set of active global input numbers for this device."""
+    def _poll_active(self, device_id: str) -> Optional[Set[int]]:
+        """Return set of active global input numbers for this device,
+        or None if the device is unreachable (no response to any query)."""
         conn = self._conn(device_id)
         if not conn:
-            return set()
+            return None
         slots = self._slot_inputs(device_id)
+        if not slots:
+            return None
         active: Set[int] = set()
+        got_response = False
         global_base = 1
         for slot_idx in sorted(slots):
             n_inputs = slots[slot_idx]
             resp = conn.send(f"{slot_idx}*0LS")
             if resp:
-                m = re.search(r"([0-3]{%d,})" % min(n_inputs, 1), resp)
+                got_response = True
+                # Require a run of at least n_inputs status digits so we match
+                # the real status string, not stray digits from command echo
+                m = re.search(r"([0-3]{%d,})" % max(n_inputs, 1), resp)
                 if m:
                     for local_idx, ch in enumerate(m.group(1)[:n_inputs], start=0):
                         if ch != "0":
                             active.add(global_base + local_idx)
             global_base += n_inputs
-        return active
+        return active if got_response else None
 
     # ── frequency detection ──────────────────────────────────────────────────
 
@@ -283,6 +320,7 @@ class _Engine:
         self._current_route[dst["id"]] = src["id"]
         self.last_event = f"{src['name']} → {dst['name']}"
         self.last_event_time = time.time()
+        _save_state({"last_event": self.last_event, "last_event_time": self.last_event_time})
         log(f"autoswitch: {self.last_event}  ({inp}*{out}! → {resp!r})")
 
     def _preset(self, device_id: str, preset_num: int, src_name: str):
@@ -293,6 +331,7 @@ class _Engine:
         resp = conn.send(f"{preset_num}.")
         self.last_event = f"{src_name} → preset {preset_num}"
         self.last_event_time = time.time()
+        _save_state({"last_event": self.last_event, "last_event_time": self.last_event_time})
         log(f"autoswitch: recalled preset {preset_num} on {device_id}  (→ {resp!r})")
 
     # ── poll loop ────────────────────────────────────────────────────────────
@@ -321,9 +360,24 @@ class _Engine:
                         continue
                     try:
                         new_active = self._poll_active(device_id)
+                        self.poll_count += 1
+
+                        if new_active is None:
+                            # Device unreachable — freeze last known state so we
+                            # don't fire spurious rules; surface it in status.
+                            if self._device_ok.get(device_id) is not False:
+                                self._device_ok[device_id] = False
+                                err = f"{device_id}: SMX unreachable — auto-switching blind"
+                                log(f"autoswitch: {err}")
+                                self.recent_errors = (self.recent_errors + [err])[-10:]
+                            continue
+
+                        if self._device_ok.get(device_id) is False:
+                            log(f"autoswitch: {device_id} reachable again")
+                        self._device_ok[device_id] = True
+
                         old_active = self._active.get(device_id, set())
                         self._active[device_id] = new_active
-                        self.poll_count += 1
 
                         # Clear current_route entries whose source just went inactive
                         newly_inactive = old_active - new_active
@@ -444,6 +498,7 @@ class _Engine:
                 if self.last_event_time else None
             ),
             "active_inputs": {k: sorted(v) for k, v in self._active.items()},
+            "device_status": dict(self._device_ok),
             "current_routes": routes,
             "errors": self.recent_errors[-5:],
         }
@@ -1028,9 +1083,18 @@ async function load() {
 // ── engine card ───────────────────────────────────────────────────────────
 function renderEngine() {
   const running = status.running && status.enabled;
-  document.getElementById('eng-dot').className = 'sdot ' + (running?'g': status.enabled?'a':'r');
-  document.getElementById('eng-running').textContent =
-    running ? 'engine polling' : status.enabled ? 'engine starting…' : 'engine paused';
+  const devStatus = status.device_status || {};
+  const unreachable = Object.keys(devStatus).filter(id => devStatus[id] === false)
+    .map(id => smxDevices.find(d=>d.id===id)?.name || id);
+  if (running && unreachable.length) {
+    document.getElementById('eng-dot').className = 'sdot r';
+    document.getElementById('eng-running').textContent =
+      unreachable.join(', ') + ' UNREACHABLE — engine blind';
+  } else {
+    document.getElementById('eng-dot').className = 'sdot ' + (running?'g': status.enabled?'a':'r');
+    document.getElementById('eng-running').textContent =
+      running ? 'engine polling' : status.enabled ? 'engine starting…' : 'engine paused';
+  }
   document.getElementById('inp-interval').value = status.poll_interval || 2;
 
   const evEl = document.getElementById('eng-event');
