@@ -151,6 +151,17 @@ def api_mtpx_preset(host: str, preset: str, inputs: int = 16):
     return JSONResponse({"ok": ok, "state": state})
 
 
+@router.post("/api/mtpx/route")
+def api_mtpx_route(host: str, input: int, output: int):
+    """Tie input to output (standard Extron SIS crosspoint). input=0 unties."""
+    if not (0 <= input <= 16 and 1 <= output <= 16):
+        return JSONResponse({"error": "out of range"}, status_code=400)
+    cmd = f"{input}*{output}!"
+    ok = _send(host, cmd)
+    log(f"MTPX {host} route {input}*{output}! ok={ok}")
+    return JSONResponse({"ok": ok})
+
+
 @router.post("/api/mtpx/peaking")
 def api_mtpx_peaking(host: str, output: int, enabled: int = 1):
     cmd = f"W{output}*{1 if enabled else 0}Opek"
@@ -186,6 +197,11 @@ async def api_mtpx_batch(request: Request):
         kind = c.get("kind")
         if kind == "zk":
             cmds.append("\x1bZK")
+            continue
+        if kind == "tie":
+            i, o = int(c.get("i", -1)), int(c.get("o", 0))
+            if 0 <= i <= 16 and 1 <= o <= 16:
+                cmds.append(f"{i}*{o}!")
             continue
         n = int(c.get("n", 0))
         if not 1 <= n <= 16:
@@ -300,6 +316,15 @@ a{color:#fbbf24;text-decoration:none}
 .bar-track:hover{background:rgba(255,255,255,0.12)}
 .bar-fill{height:100%;border-radius:3px;pointer-events:none;transition:width .05s}
 .bar-val{font-size:.68rem;font-family:monospace;color:#64748b;width:20px;text-align:right;flex-shrink:0}
+/* ── crosspoint grid ─────────────── */
+.xp-wrap{padding:12px 16px 20px;overflow-x:auto}
+.xp{border-collapse:collapse}
+.xp th{font-size:.62rem;color:#64748b;font-family:monospace;padding:3px;font-weight:600;min-width:24px}
+.xp td{padding:2px}
+.xc{width:22px;height:22px;border-radius:5px;border:1px solid #263145;background:#131a2b;cursor:pointer;transition:.1s;display:block}
+.xc:hover{border-color:#d97706}
+.xc.on{background:#d97706;border-color:#fbbf24;box-shadow:0 0 6px #d9770688}
+.rowlbl{font-size:.66rem;color:#94a3b8;font-family:monospace;padding-right:8px;text-align:right;white-space:nowrap}
 /* ── toast ───────────────────────── */
 #toast{position:fixed;bottom:18px;right:18px;background:#1e293b;border:1px solid #d97706;color:#e2e8f0;padding:9px 15px;border-radius:9px;font-size:.82rem;display:none;z-index:999;box-shadow:0 4px 20px #0009;max-width:320px}
 </style>
@@ -362,6 +387,13 @@ a{color:#fbbf24;text-decoration:none}
 <!-- ── Status line ─────────────────────────────────────────────────────────── -->
 <div class="sbar" id="sbar">Ready</div>
 
+<!-- ── Routing ─────────────────────────────────────────────────────────────── -->
+<div class="sect" onclick="toggleSect(this,'xp-wrap')">
+  <h2>Routing</h2><span class="chev">▼</span>
+  <span class="sect-note">{in}*{out}! · click a lit cell to untie · state is last-sent (no live query yet)</span>
+</div>
+<div class="xp-wrap sect-body" id="xp-wrap"></div>
+
 <!-- ── Input skew ──────────────────────────────────────────────────────────── -->
 <div class="sect" onclick="toggleSect(this,'grid')">
   <h2>Input Skew</h2><span class="chev">▼</span>
@@ -391,11 +423,12 @@ const DEVICES = [
 // STATE[host].i[n] = input skew, STATE[host].o[n] = output skew, .peak[n] = bool
 const STATE = {};
 DEVICES.forEach(d => {
-  STATE[d.host] = {i:{}, o:{}, peak:{}};
+  STATE[d.host] = {i:{}, o:{}, peak:{}, tie:{}};
   for (let n = 1; n <= 16; n++) {
     STATE[d.host].i[n] = {r:0, g:0, b:0};
     STATE[d.host].o[n] = {r:0, g:0, b:0};
     STATE[d.host].peak[n] = true;
+    STATE[d.host].tie[n] = 0;   // input currently tied to output n (0 = unknown/untied)
   }
 });
 
@@ -453,6 +486,43 @@ function buildGrids() {
   const ogrid = document.getElementById('ogrid');
   ogrid.innerHTML = '';
   for (let n = 1; n <= dev.outputs; n++) ogrid.appendChild(makeCard('o', dev.host, n));
+  buildXp();
+}
+
+// ── crosspoint routing grid ───────────────────────────────────────────────────
+function buildXp() {
+  const dev = activeDev();
+  const ties = STATE[dev.host].tie;
+  let h = '<table class="xp"><tr><th></th>';
+  for (let i = 1; i <= dev.inputs; i++) h += '<th>' + i + '</th>';
+  h += '<th style="color:#334155;padding-left:8px">in →</th></tr>';
+  for (let o = 1; o <= dev.outputs; o++) {
+    h += '<tr><td class="rowlbl">out ' + o + '</td>';
+    for (let i = 1; i <= dev.inputs; i++) {
+      h += '<td><span class="xc' + (ties[o] === i ? ' on' : '') + '" id="xc-' + i + '-' + o +
+           '" onclick="tie(' + i + ',' + o + ')" title="' + i + '*' + o + '!"></span></td>';
+    }
+    h += '</tr>';
+  }
+  h += '</table>';
+  document.getElementById('xp-wrap').innerHTML = h;
+}
+
+function tie(i, o) {
+  const hosts = getHosts();
+  const untying = STATE[activeDev().host].tie[o] === i;
+  const inp = untying ? 0 : i;
+  hosts.forEach(host => {
+    STATE[host].tie[o] = inp;
+    fetch('/api/mtpx/route?host=' + host + '&input=' + inp + '&output=' + o, {method:'POST'})
+      .then(r => r.json())
+      .then(j => {
+        if (!j.ok) setStatus('⚠ ' + host + ' not responding — is it connected?');
+        else setStatus(inp + '*' + o + '! → ' + host);
+      })
+      .catch(() => setStatus('Network error'));
+  });
+  buildXp();
 }
 
 function makeCard(kind, host, n) {

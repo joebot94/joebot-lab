@@ -193,10 +193,18 @@ class _Engine:
         self.last_event: Optional[str] = None
         self.last_event_time: Optional[float] = None
         self.recent_errors: List[str] = []
+        # Rolling event feed shown on the control page
+        self.events: List[dict] = []
         # Restore last-fired across restarts/redeploys
         st = _load_state()
         self.last_event = st.get("last_event")
         self.last_event_time = st.get("last_event_time")
+
+    def _event(self, kind: str, text: str):
+        """kind: fire | test | release | offline | online | error"""
+        self.events.append({"t": time.time(), "kind": kind, "text": text})
+        if len(self.events) > 60:
+            self.events = self.events[-60:]
 
     # ── connection management ────────────────────────────────────────────────
 
@@ -321,6 +329,7 @@ class _Engine:
         self.last_event = f"{src['name']} → {dst['name']}"
         self.last_event_time = time.time()
         _save_state({"last_event": self.last_event, "last_event_time": self.last_event_time})
+        self._event("fire", f"{src['name']} → {dst['name']}  ({inp}*{out}!)")
         log(f"autoswitch: {self.last_event}  ({inp}*{out}! → {resp!r})")
 
     def _preset(self, device_id: str, preset_num: int, src_name: str):
@@ -332,6 +341,7 @@ class _Engine:
         self.last_event = f"{src_name} → preset {preset_num}"
         self.last_event_time = time.time()
         _save_state({"last_event": self.last_event, "last_event_time": self.last_event_time})
+        self._event("fire", f"{src_name} → preset {preset_num}")
         log(f"autoswitch: recalled preset {preset_num} on {device_id}  (→ {resp!r})")
 
     # ── poll loop ────────────────────────────────────────────────────────────
@@ -370,10 +380,12 @@ class _Engine:
                                 err = f"{device_id}: SMX unreachable — auto-switching blind"
                                 log(f"autoswitch: {err}")
                                 self.recent_errors = (self.recent_errors + [err])[-10:]
+                                self._event("offline", f"{device_id} unreachable — engine blind")
                             continue
 
                         if self._device_ok.get(device_id) is False:
                             log(f"autoswitch: {device_id} reachable again")
+                            self._event("online", f"{device_id} reachable again")
                         self._device_ok[device_id] = True
 
                         old_active = self._active.get(device_id, set())
@@ -389,6 +401,8 @@ class _Engine:
                             for dst_id, holding_src_id in list(self._current_route.items()):
                                 if holding_src_id in gone_ids:
                                     del self._current_route[dst_id]
+                                    s_name = next((s["name"] for s in srcs if s["id"] == holding_src_id), "?")
+                                    self._event("release", f"{s_name} went dark — released its destination")
 
                         newly_active = new_active - old_active
                         if not newly_active:
@@ -501,6 +515,10 @@ class _Engine:
             "device_status": dict(self._device_ok),
             "current_routes": routes,
             "errors": self.recent_errors[-5:],
+            "events": [
+                {"ago": round(time.time() - e["t"]), "kind": e["kind"], "text": e["text"]}
+                for e in reversed(self.events[-25:])
+            ],
         }
 
     def restart(self):
@@ -692,6 +710,38 @@ def as_delete_rule(rid: str):
     return JSONResponse({"ok": True})
 
 
+@router.post("/api/autoswitch/rules/{rid}/test")
+def as_test_rule(rid: str):
+    """Fire a rule's actions right now, bypassing signal detection and the
+    freq gate — lets you verify wiring without powering a console on/off."""
+    cfg = _load()
+    rule = next((r for r in cfg.get("rules", []) if r["id"] == rid), None)
+    if not rule:
+        return JSONResponse({"error": "rule not found"}, status_code=404)
+    sources = {s["id"]: s for s in cfg.get("sources", [])}
+    dests   = {d["id"]: d for d in cfg.get("destinations", [])}
+    src = sources.get(rule.get("source_id"))
+    if not src:
+        return JSONResponse({"error": "rule's source was deleted"}, status_code=400)
+
+    device_id = src.get("device_id", "")
+    _engine._event("test", f"manual test of '{src.get('name','?')}' rule")
+    fired = []
+    for action in _rule_actions(rule, dests):
+        if action["type"] == "route":
+            _engine._route(src, action["dest"], device_id)
+            fired.append(f"{src['name']} → {action['dest']['name']}")
+        elif action["type"] == "preset":
+            n = int(action.get("preset_num", 1))
+            _engine._preset(action.get("device_id", device_id), n, src.get("name", "?"))
+            fired.append(f"preset {n}")
+    return JSONResponse({
+        "ok": True,
+        "fired": fired,
+        "device_ok": _engine._device_ok.get(device_id),
+    })
+
+
 # ── engine control ────────────────────────────────────────────────────────────
 
 @router.post("/api/autoswitch/engine")
@@ -826,17 +876,56 @@ main{max-width:1100px;margin:0 auto;padding:18px 16px}
 
 .eng-card{background:var(--panel);border:1px solid var(--line);border-radius:10px;
   padding:12px 16px;margin-bottom:12px}
-.eng-top{display:flex;align-items:center;gap:14px;flex-wrap:wrap;margin-bottom:0}
-.eng-card.has-routes .eng-top{margin-bottom:10px}
+.eng-top{display:flex;align-items:center;gap:14px;flex-wrap:wrap;margin-bottom:10px}
 .eng-stat{display:flex;align-items:center;gap:6px;font-size:12px}
 .sdot{width:7px;height:7px;border-radius:50%}
 .sdot.g{background:var(--ok);box-shadow:0 0 4px rgba(52,211,153,.5)}
-.sdot.r{background:var(--bad)}
+.sdot.r{background:var(--bad);box-shadow:0 0 4px rgba(255,84,112,.5)}
 .sdot.a{background:var(--warn)}
 .elab{color:var(--muted);font-size:10px;letter-spacing:.05em}
 .eval{color:var(--ink)}
+.eng-name{font-weight:700;font-size:12.5px}
+.dev-chip{display:inline-flex;align-items:center;gap:5px;font-size:10px;
+  padding:2px 9px;border-radius:20px;border:1px solid var(--line);color:var(--muted)}
+.dev-chip .sdot{width:6px;height:6px}
+.dev-chip.up{border-color:rgba(52,211,153,.35);color:var(--ok)}
+.dev-chip.down{border-color:rgba(255,84,112,.4);color:var(--bad)}
+.int-inp{background:var(--panel2);border:1px solid var(--line);color:var(--ink);
+  border-radius:5px;padding:3px 6px;width:52px;text-align:center}
+.int-inp:focus{outline:none;border-color:var(--accent)}
+.lf-row{display:flex;align-items:baseline;gap:10px;padding:9px 12px;
+  background:rgba(0,0,0,.22);border:1px solid var(--line);border-radius:7px}
+.lf-lbl{font-size:9px;font-weight:700;letter-spacing:.12em;text-transform:uppercase;
+  color:var(--muted);flex-shrink:0}
+.lf-val{font-size:14px;font-weight:700;color:var(--ink)}
+.lf-val.none{color:var(--muted);font-weight:400;font-size:12px}
+.lf-ago{font-size:10.5px;color:var(--muted)}
+.eng-err-line{margin-top:8px;font-size:11px;color:var(--warn);display:none}
+.ev-toggle{background:none;border:none;color:var(--muted);cursor:pointer;
+  font-family:var(--mono);font-size:10.5px;letter-spacing:.06em;padding:8px 2px 0;
+  display:flex;align-items:center;gap:6px}
+.ev-toggle:hover{color:var(--ink)}
+.ev-arrow{display:inline-block;transition:transform .15s;font-size:9px}
+.ev-toggle.open .ev-arrow{transform:rotate(90deg)}
+.ev-feed{margin-top:6px;max-height:230px;overflow-y:auto;border-top:1px solid var(--line);
+  padding-top:6px;display:none}
+.ev-feed.open{display:block}
+.ev-row{display:flex;align-items:baseline;gap:8px;padding:3px 2px;font-size:11px;
+  border-bottom:1px dashed rgba(38,43,54,.6)}
+.ev-row:last-child{border-bottom:none}
+.ev-tag{font-size:8.5px;font-weight:700;letter-spacing:.09em;padding:1px 6px;
+  border-radius:3px;flex-shrink:0;min-width:46px;text-align:center}
+.ev-tag.fire{background:rgba(52,211,153,.12);color:var(--ok)}
+.ev-tag.test{background:rgba(96,165,250,.12);color:var(--blue)}
+.ev-tag.release{background:rgba(167,139,250,.12);color:var(--purple)}
+.ev-tag.offline{background:rgba(255,84,112,.12);color:var(--bad)}
+.ev-tag.online{background:rgba(52,211,153,.12);color:var(--ok)}
+.ev-tag.error{background:rgba(245,185,66,.12);color:var(--warn)}
+.ev-text{flex:1;color:var(--ink)}
+.ev-ago{font-size:9.5px;color:var(--muted);flex-shrink:0}
+.ev-empty{color:var(--muted);font-size:11px;padding:6px 2px}
 .routes-bar{display:flex;gap:8px;flex-wrap:wrap;border-top:1px solid var(--line);
-  padding-top:10px;margin-top:2px}
+  padding-top:10px;margin-top:10px}
 .route-pill{display:flex;align-items:center;gap:5px;background:var(--panel2);
   border:1px solid var(--line);border-radius:5px;padding:3px 8px;font-size:10.5px}
 .route-pill .rp-dst{color:var(--purple);font-weight:700}
@@ -942,20 +1031,27 @@ main{max-width:1100px;margin:0 auto;padding:18px 16px}
   <!-- Engine status -->
   <div class="eng-card" id="eng-card">
     <div class="eng-top">
-      <div class="eng-stat"><div class="sdot g" id="eng-dot"></div><span id="eng-running">–</span></div>
-      <div class="eng-stat"><span class="elab">poll&nbsp;</span><span class="eval" id="eng-poll">–</span></div>
-      <div class="eng-stat"><span class="elab">last fired&nbsp;</span><span class="eval" id="eng-event">–</span></div>
-      <div class="eng-stat" id="eng-err-wrap" style="display:none">
-        <span class="sdot a"></span><span id="eng-err" style="color:var(--warn)">–</span>
-      </div>
+      <div class="eng-stat"><div class="sdot g" id="eng-dot"></div><span class="eng-name" id="eng-running">–</span></div>
+      <div id="dev-chips" style="display:flex;gap:6px;flex-wrap:wrap"></div>
       <div class="spacer"></div>
-      <div class="ff" style="flex:0;min-width:0">
-        <label>poll interval (s)</label>
+      <div class="eng-stat"><span class="elab">polls</span><span class="eval" id="eng-poll">–</span></div>
+      <div class="eng-stat"><span class="elab">every</span>
         <input id="inp-interval" type="number" min="0.5" max="60" step="0.5"
-          style="width:80px" onchange="setInterval_(this.value)"/>
+          class="int-inp" onchange="setInterval_(this.value)"/>
+        <span class="elab">s</span>
       </div>
     </div>
+    <div class="lf-row">
+      <span class="lf-lbl">Last fired</span>
+      <span class="lf-val" id="eng-event">–</span>
+      <span class="lf-ago" id="eng-event-ago"></span>
+    </div>
+    <div class="eng-err-line" id="eng-err-wrap">⚠ <span id="eng-err">–</span></div>
     <div class="routes-bar" id="routes-bar" style="display:none"></div>
+    <button class="ev-toggle" id="ev-toggle" onclick="toggleEvents()">
+      <span class="ev-arrow">▸</span> event history <span id="ev-count"></span>
+    </button>
+    <div class="ev-feed" id="ev-feed"></div>
   </div>
 
   <div class="split">
@@ -1084,34 +1180,55 @@ async function load() {
 function renderEngine() {
   const running = status.running && status.enabled;
   const devStatus = status.device_status || {};
-  const unreachable = Object.keys(devStatus).filter(id => devStatus[id] === false)
-    .map(id => smxDevices.find(d=>d.id===id)?.name || id);
-  if (running && unreachable.length) {
+  const anyDown = Object.values(devStatus).some(v => v === false);
+
+  // Status dot + label
+  if (running && anyDown) {
     document.getElementById('eng-dot').className = 'sdot r';
-    document.getElementById('eng-running').textContent =
-      unreachable.join(', ') + ' UNREACHABLE — engine blind';
+    document.getElementById('eng-running').textContent = 'engine blind — SMX down';
   } else {
     document.getElementById('eng-dot').className = 'sdot ' + (running?'g': status.enabled?'a':'r');
     document.getElementById('eng-running').textContent =
       running ? 'engine polling' : status.enabled ? 'engine starting…' : 'engine paused';
   }
-  document.getElementById('inp-interval').value = status.poll_interval || 2;
 
+  // Per-device chips
+  document.getElementById('dev-chips').innerHTML = Object.keys(devStatus).map(id => {
+    const name = smxDevices.find(d=>d.id===id)?.name || id;
+    const up = devStatus[id];
+    return `<span class="dev-chip ${up?'up':'down'}">
+      <span class="sdot ${up?'g':'r'}"></span>${esc(name)} ${up?'online':'UNREACHABLE'}</span>`;
+  }).join('');
+
+  // Interval input — don't clobber it while the user is typing in it
+  const intInp = document.getElementById('inp-interval');
+  if (document.activeElement !== intInp) intInp.value = status.poll_interval || 2;
+
+  // Last fired — its own prominent row
   const evEl = document.getElementById('eng-event');
-  evEl.textContent = status.last_event
-    ? status.last_event + (status.last_event_ago != null ? ' · '+fmtAgo(status.last_event_ago) : '')
-    : 'none yet';
+  const agoEl = document.getElementById('eng-event-ago');
+  if (status.last_event) {
+    evEl.textContent = status.last_event;
+    evEl.className = 'lf-val';
+    agoEl.textContent = status.last_event_ago != null ? fmtAgo(status.last_event_ago) : '';
+  } else {
+    evEl.textContent = 'nothing yet — waiting for a source to turn on';
+    evEl.className = 'lf-val none';
+    agoEl.textContent = '';
+  }
 
   document.getElementById('eng-poll').textContent =
-    'every '+(status.poll_interval||2)+'s  ('+(status.poll_count||0)+' polls)';
+    (status.poll_count||0).toLocaleString();
 
   const errWrap = document.getElementById('eng-err-wrap');
   const errs = status.errors || [];
-  errWrap.style.display = errs.length ? 'flex' : 'none';
+  errWrap.style.display = errs.length ? 'block' : 'none';
   if (errs.length) document.getElementById('eng-err').textContent = errs[errs.length-1];
 
   document.getElementById('btn-pause').textContent =
     status.enabled ? '⏸ Pause engine' : '▶ Resume engine';
+
+  renderEvents();
 
   // Current routes bar
   const routes = status.current_routes || [];
@@ -1132,6 +1249,34 @@ function renderEngine() {
     bar.style.display = 'none';
     card.classList.remove('has-routes');
   }
+}
+
+// ── event feed ────────────────────────────────────────────────────────────
+let eventsOpen = false;
+
+function toggleEvents() {
+  eventsOpen = !eventsOpen;
+  document.getElementById('ev-toggle').classList.toggle('open', eventsOpen);
+  document.getElementById('ev-feed').classList.toggle('open', eventsOpen);
+  renderEvents();
+}
+
+function renderEvents() {
+  const evs = status.events || [];
+  document.getElementById('ev-count').textContent = evs.length ? '('+evs.length+')' : '';
+  if (!eventsOpen) return;
+  const feed = document.getElementById('ev-feed');
+  if (!evs.length) {
+    feed.innerHTML = '<div class="ev-empty">No events yet this session.</div>';
+    return;
+  }
+  feed.innerHTML = evs.map(e =>
+    `<div class="ev-row">
+      <span class="ev-tag ${esc(e.kind)}">${esc(e.kind.toUpperCase())}</span>
+      <span class="ev-text">${esc(e.text)}</span>
+      <span class="ev-ago">${fmtAgo(e.ago)}</span>
+    </div>`
+  ).join('');
 }
 
 // ── sources ───────────────────────────────────────────────────────────────
@@ -1229,10 +1374,24 @@ function renderRules() {
         <span class="kw">when</span>${srcChip}<span class="kw">turns on</span>
         ${actionChips}${freqChip}
       </div>
+      <button class="ic" title="Fire this rule right now (test)" onclick="testRule('${r.id}')"
+        style="color:var(--blue)">▶</button>
       <button class="tog ${togCls}" onclick="toggleRule('${r.id}',${!r.enabled})"></button>
       <button class="ic del" onclick="deleteRule('${r.id}')">✕</button>
     </div>`;
   }).join('');
+}
+
+async function testRule(id) {
+  toast('Firing rule…');
+  const j = await post('/api/autoswitch/rules/'+id+'/test', {});
+  if (j.ok) {
+    toast('Fired: ' + (j.fired||[]).join(' + ') +
+      (j.device_ok === false ? ' — ⚠ device unreachable, commands lost' : ''));
+  } else {
+    toast('Test failed: ' + (j.error || 'unknown error'));
+  }
+  load();
 }
 
 // ── render all ────────────────────────────────────────────────────────────
