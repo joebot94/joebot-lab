@@ -37,7 +37,7 @@ import modules_store
 # --------------------------------------------------------------------------- #
 # Config
 # --------------------------------------------------------------------------- #
-VERSION = "2.12.0"  # bump this on every deploy so you can confirm the new code is running
+VERSION = "2.13.0"  # bump this on every deploy so you can confirm the new code is running
 
 PORT          = int(os.getenv("DASHBOARD_PORT", "8080"))
 POLL_SECONDS  = int(os.getenv("POLL_SECONDS", "10"))
@@ -278,6 +278,14 @@ def _startup():
     _prime_state()
     threading.Thread(target=_poll_loop, daemon=True).start()
     _start_autoswitch()
+
+
+@app.get("/static/lab.css")
+def lab_css():
+    from fastapi.responses import Response
+    import shared as _shared
+    return Response(_shared.LAB_CSS, media_type="text/css",
+                    headers={"Cache-Control": "max-age=300"})
 
 
 @app.get("/api/status")
@@ -964,8 +972,10 @@ FRONTEND_HTML = r"""<!doctype html>
   .spacer{flex:1}
   button{font-family:var(--mono);cursor:pointer}
   .toggle{background:var(--panel2);color:var(--muted);border:1px solid var(--line);
-    border-radius:7px;padding:7px 12px;font-size:12.5px}
+    border-radius:7px;padding:7px 12px;font-size:12.5px;
+    display:inline-flex;align-items:center;gap:6px}
   .toggle:hover{color:var(--ink);border-color:var(--accent)}
+  .hdr-actions{display:flex;gap:8px;flex-wrap:wrap}
 
   main{max-width:1500px;margin:0 auto;padding:20px 18px}
   .fam{background:var(--panel);border:1px solid var(--line);border-radius:12px;
@@ -987,6 +997,10 @@ FRONTEND_HTML = r"""<!doctype html>
     main{padding:12px 10px}
     header{padding:14px 14px;gap:10px}
     .brand{font-size:18px}
+    /* compact icon-only header buttons */
+    .hdr-actions{width:100%;justify-content:flex-end;gap:6px}
+    .toggle .tl{display:none}
+    .toggle{padding:7px 10px;font-size:15px;line-height:1}
     .fam-head{flex-wrap:wrap;padding:12px 14px;gap:2px 0}
     .fam-name{width:100%;min-width:0;font-size:15px;margin-bottom:4px}
     .fam-dots{flex:1;gap:4px}
@@ -1071,6 +1085,21 @@ FRONTEND_HTML = r"""<!doctype html>
   .sparkline{display:flex;gap:2px;align-items:flex-end;height:20px;margin-top:6px}
   .spark-bar{width:4px;border-radius:1px;flex:none;min-height:2px}
 
+  /* offline / powered-down handling */
+  .off-banner{max-width:1500px;margin:14px auto 0;padding:0 18px;display:none}
+  .off-banner.show{display:block}
+  .off-banner-inner{display:flex;align-items:center;gap:12px;flex-wrap:wrap;
+    background:rgba(69,75,88,.12);border:1px solid var(--line);border-radius:10px;
+    padding:10px 16px;font-size:12.5px;color:var(--muted)}
+  .off-banner-inner b{color:var(--ink)}
+  .off-banner-inner .off-btn{margin-left:auto;background:var(--panel2);color:var(--muted);
+    border:1px solid var(--line);border-radius:6px;padding:5px 11px;font-size:11.5px}
+  .off-banner-inner .off-btn:hover{color:var(--ink);border-color:var(--accent)}
+  .dev.powered-off{opacity:.55}
+  .dev.powered-off .pill.s-bad{color:var(--muted);border-color:var(--line);background:transparent}
+  .off-note{font-size:11.5px;color:var(--muted);margin-top:4px}
+  @media(max-width:640px){.off-banner{padding:0 10px}}
+
   /* flash animation on status change */
   @keyframes statusflash{
     0%{box-shadow:0 0 0 0 rgba(255,255,255,.5)}
@@ -1090,30 +1119,47 @@ FRONTEND_HTML = r"""<!doctype html>
     <span>polling <span class="v" id="hdr-int">—</span></span>
   </div>
   <div class="spacer"></div>
-  <button class="toggle" id="btn-sound" title="Toggle sound alerts">🔕 Sound</button>
-  <button class="toggle" id="btn-expand">Expand all</button>
-  <button class="toggle" id="btn-logs">Logs</button>
-  <a href="/control/autoswitch" style="text-decoration:none">
-    <button class="toggle">🤖 Auto-Switch</button>
-  </a>
-  <a href="/config" style="text-decoration:none">
-    <button class="toggle">⚙ Config</button>
-  </a>
+  <div class="hdr-actions">
+    <button class="toggle" id="btn-sound" title="Toggle sound alerts">
+      <span class="ti" id="snd-ico">🔕</span><span class="tl">Sound</span></button>
+    <button class="toggle" id="btn-expand" title="Expand / collapse all families">
+      <span class="ti">⊞</span><span class="tl" id="expand-lbl">Expand all</span></button>
+    <button class="toggle" id="btn-logs" title="Show logs">
+      <span class="ti">📜</span><span class="tl">Logs</span></button>
+    <a href="/control/autoswitch" style="text-decoration:none">
+      <button class="toggle" title="Auto-Switching"><span class="ti">🤖</span><span class="tl">Auto-Switch</span></button>
+    </a>
+    <a href="/config" style="text-decoration:none">
+      <button class="toggle" title="Config"><span class="ti">⚙</span><span class="tl">Config</span></button>
+    </a>
+  </div>
 </header>
+<div class="off-banner" id="off-banner"><div class="off-banner-inner">
+  <span>🔌 <b id="off-count">0</b> devices are unreachable and have <b>never been seen</b> since startup — rack powered down?</span>
+  <button class="off-btn" id="off-toggle">Show full cards</button>
+</div></div>
 <main id="grid"></main>
 <div id="logs"><div class="logbox" id="logbox"></div></div>
 
 <script>
 const OPEN_KEY="joebot_lab_open";
 const SOUND_KEY="joebot_sound";
+const OFFLINE_KEY="joebot_show_offline_full";
 let openFams=new Set(JSON.parse(localStorage.getItem(OPEN_KEY)||"[]"));
 let soundOn=localStorage.getItem(SOUND_KEY)==="1";
-let pollMs=30000, built=false;
+let showOfflineFull=localStorage.getItem(OFFLINE_KEY)==="1";
+let pollMs=30000, built=false, lastData=null;
 let _audioCtx=null;
+
+// A device is "powered off" (vs faulted) if it's unreachable AND has never
+// responded since the server started — collapse those to one quiet line.
+function isPoweredOff(d){
+  return d.status==="bad" && d.last_seen_ago==null;
+}
 
 // ── sound ────────────────────────────────────────────────────────────────────
 function updateSoundBtn(){
-  document.getElementById("btn-sound").textContent=soundOn?"🔔 Sound":"🔕 Sound";
+  document.getElementById("snd-ico").textContent=soundOn?"🔔":"🔕";
 }
 document.getElementById("btn-sound").addEventListener("click",()=>{
   soundOn=!soundOn;
@@ -1168,6 +1214,12 @@ function uptimeBadge(pct){
 
 // ── device card body ─────────────────────────────────────────────────────────
 function devBody(d){
+  // Powered-off devices collapse to two quiet lines unless expanded
+  if(isPoweredOff(d) && !showOfflineFull){
+    return `<div class="dev-net"><span class="role">${esc(d.role)}</span> · `+
+           `${esc(d.ip)}</div>`+
+           `<div class="off-note">unreachable · never seen since startup</div>`;
+  }
   let h="";
   h+=`<div class="dev-net"><span class="role">${esc(d.role)}</span> · `+
      `${esc(d.ip)} · ${esc(d.hostname)}</div>`;
@@ -1372,9 +1424,12 @@ function patch(data){
 
     dot.className="dot s-"+d.status;
     document.getElementById("devname-"+id).textContent=d.name;
+    const card=document.getElementById("dev-"+id);
+    const off=isPoweredOff(d)&&!showOfflineFull;
+    if(card) card.classList.toggle("powered-off",off);
     const pill=document.getElementById("devpill-"+id);
     pill.className="pill s-"+d.status;
-    pill.textContent=({ok:"ONLINE",warn:"WARN",bad:"FAULT",gray:"SCANNING…"})[d.status]||d.status;
+    pill.textContent=off?"OFF?":(({ok:"ONLINE",warn:"WARN",bad:"FAULT",gray:"SCANNING…"})[d.status]||d.status);
 
     // uptime badge next to pill
     const upEl=document.getElementById("devup-"+id);
@@ -1384,17 +1439,33 @@ function patch(data){
 
     const rawWrap=document.getElementById("rawwrap-"+id);
     const rawPre=document.getElementById("rawpre-"+id);
-    if(d.raw && Object.keys(d.raw).length){
+    if(d.raw && Object.keys(d.raw).length && !off){
       rawWrap.style.display="block";
       rawPre.textContent=Object.entries(d.raw).map(([k,v])=>`${k}  ->  ${v}`).join("\n");
     } else { rawWrap.style.display="none"; }
   }
+
+  // Powered-down banner
+  const offCount=Object.values(data.devices).filter(isPoweredOff).length;
+  document.getElementById("off-banner").classList.toggle("show",offCount>=3);
+  document.getElementById("off-count").textContent=offCount;
 }
 
 // ── poll loop ────────────────────────────────────────────────────────────────
+document.getElementById("off-toggle").addEventListener("click",()=>{
+  showOfflineFull=!showOfflineFull;
+  localStorage.setItem(OFFLINE_KEY,showOfflineFull?"1":"0");
+  document.getElementById("off-toggle").textContent=
+    showOfflineFull?"Collapse offline cards":"Show full cards";
+  if(lastData) patch(lastData);
+});
+document.getElementById("off-toggle").textContent=
+  showOfflineFull?"Collapse offline cards":"Show full cards";
+
 async function refresh(){
   try{
     const r=await fetch("/api/status");const data=await r.json();
+    lastData=data;
     // Rebuild DOM if: never built, new devices appeared, or families changed
     const needsBuild = !built ||
       data.families.some(f=>f.dots.some(d=>!document.getElementById("dev-"+d.id))) ||
@@ -1415,13 +1486,14 @@ document.getElementById("btn-logs").addEventListener("click",()=>{
   const el=document.getElementById("logs");el.classList.toggle("open");
   if(el.classList.contains("open")) loadLogs();
 });
-document.getElementById("btn-expand").addEventListener("click",e=>{
+document.getElementById("btn-expand").addEventListener("click",()=>{
   const all=document.querySelectorAll(".fam");
   const anyClosed=[...all].some(f=>!f.classList.contains("open"));
   all.forEach(f=>{const id=f.id.replace("fam-","");
     if(anyClosed){f.classList.add("open");openFams.add(id);}
     else{f.classList.remove("open");openFams.delete(id);}});
-  e.target.textContent=anyClosed?"Collapse all":"Expand all";persist();
+  document.getElementById("expand-lbl").textContent=anyClosed?"Collapse all":"Expand all";
+  persist();
 });
 
 setInterval(()=>{
