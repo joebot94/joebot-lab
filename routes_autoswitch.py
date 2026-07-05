@@ -316,6 +316,11 @@ class _Engine:
 
     # ── routing & preset actions ─────────────────────────────────────────────
 
+    # SMX ties are plane-prefixed (same SIS patterns as smx_control.py, which
+    # are confirmed working from the manual routing page):
+    #   {plane}*{input}*{output}!   planes: 00=VGA 01=S-Video 02=Video 04=Audio
+    SMX_PLANES = ["00", "01", "02", "04"]
+
     def _route(self, src: dict, dst: dict, fallback_device_id: str):
         device_id = dst.get("device_id") or fallback_device_id
         conn = self._conn(device_id)
@@ -324,20 +329,25 @@ class _Engine:
             return
         inp = src["input"]
         out = dst["output"]
-        resp = conn.send(f"{inp}*{out}!")
+        # Destination may limit which planes it takes (breakaway routing);
+        # default is all planes so the console goes everywhere it should.
+        planes = dst.get("planes") or self.SMX_PLANES
+        resps = [conn.send(f"{p}*{inp}*{out}!") for p in planes]
         self._current_route[dst["id"]] = src["id"]
         self.last_event = f"{src['name']} → {dst['name']}"
         self.last_event_time = time.time()
         _save_state({"last_event": self.last_event, "last_event_time": self.last_event_time})
-        self._event("fire", f"{src['name']} → {dst['name']}  ({inp}*{out}!)")
-        log(f"autoswitch: {self.last_event}  ({inp}*{out}! → {resp!r})")
+        self._event("fire", f"{src['name']} → {dst['name']}  ({inp}*{out} on {len(planes)} planes)")
+        log(f"autoswitch: {self.last_event}  (planes {planes} → {resps!r})")
 
     def _preset(self, device_id: str, preset_num: int, src_name: str):
         conn = self._conn(device_id)
         if not conn:
             log(f"autoswitch: no connection for preset device {device_id}")
             return
-        resp = conn.send(f"{preset_num}.")
+        # SMX global preset recall is Rpr{nn} (verified in smx_control.py),
+        # not the {n}. form used by DMS/Matrix units.
+        resp = conn.send(f"Rpr{preset_num:02d}")
         self.last_event = f"{src_name} → preset {preset_num}"
         self.last_event_time = time.time()
         _save_state({"last_event": self.last_event, "last_event_time": self.last_event_time})

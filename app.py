@@ -37,7 +37,7 @@ import modules_store
 # --------------------------------------------------------------------------- #
 # Config
 # --------------------------------------------------------------------------- #
-VERSION = "2.13.0"  # bump this on every deploy so you can confirm the new code is running
+VERSION = "2.13.1"  # bump this on every deploy so you can confirm the new code is running
 
 PORT          = int(os.getenv("DASHBOARD_PORT", "8080"))
 POLL_SECONDS  = int(os.getenv("POLL_SECONDS", "10"))
