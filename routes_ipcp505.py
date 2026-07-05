@@ -148,16 +148,12 @@ IPCP505_HTML = r"""<!doctype html>
 <meta charset="utf-8"/>
 <meta name="viewport" content="width=device-width,initial-scale=1"/>
 <title>IPCP Pro 505 · Control</title>
+<link rel="stylesheet" href="/static/lab.css"/>
 <style>
-:root{
-  --bg:#0c0e12;--panel:#15181f;--panel2:#1b1f28;--line:#262b36;
-  --ink:#e8ebf0;--muted:#8b93a3;--faint:#1f232d;
-  --ok:#34d399;--warn:#f5b942;--bad:#ff5470;--accent:#f5b942;
-  --mono:ui-monospace,"SF Mono","JetBrains Mono",Menlo,Consolas,monospace;
-}
-*{box-sizing:border-box;margin:0;padding:0}
-body{background:var(--bg);color:var(--ink);font-family:var(--mono);
-  min-height:100dvh;padding-bottom:60px}
+/* base tokens come from lab.css */
+:root{ --faint:#1f232d;--accent:#f5b942; }
+*{margin:0;padding:0}
+body{min-height:100dvh;padding-bottom:60px}
 header{display:flex;align-items:center;gap:14px;padding:14px 20px;
   border-bottom:1px solid var(--line);
   background:linear-gradient(180deg,rgba(245,185,66,.06),transparent)}
@@ -542,16 +538,12 @@ VTG400_HTML = r"""<!doctype html>
 <meta charset="utf-8"/>
 <meta name="viewport" content="width=device-width,initial-scale=1"/>
 <title>VTG 400 · Control</title>
+<link rel="stylesheet" href="/static/lab.css"/>
 <style>
-:root{
-  --bg:#0c0e12;--panel:#15181f;--panel2:#1b1f28;--line:#262b36;
-  --ink:#e8ebf0;--muted:#8b93a3;--faint:#1f232d;
-  --ok:#34d399;--warn:#f5b942;--bad:#ff5470;--accent:#f5b942;
-  --mono:ui-monospace,"SF Mono","JetBrains Mono",Menlo,Consolas,monospace;
-}
-*{box-sizing:border-box;margin:0;padding:0}
-body{background:var(--bg);color:var(--ink);font-family:var(--mono);
-  min-height:100dvh;padding-bottom:60px}
+/* base tokens come from lab.css */
+:root{ --faint:#1f232d;--accent:#f5b942; }
+*{margin:0;padding:0}
+body{min-height:100dvh;padding-bottom:60px}
 header{display:flex;align-items:center;gap:14px;padding:14px 20px;
   border-bottom:1px solid var(--line);
   background:linear-gradient(180deg,rgba(245,185,66,.06),transparent)}
@@ -887,16 +879,12 @@ USP405_HTML = r"""<!doctype html>
 <meta charset="utf-8"/>
 <meta name="viewport" content="width=device-width,initial-scale=1"/>
 <title>USP 405 · Control</title>
+<link rel="stylesheet" href="/static/lab.css"/>
 <style>
-:root{
-  --bg:#0c0e12;--panel:#15181f;--panel2:#1b1f28;--line:#262b36;
-  --ink:#e8ebf0;--muted:#8b93a3;--faint:#1f232d;
-  --ok:#34d399;--warn:#f5b942;--bad:#ff5470;--accent:#22d3ee;
-  --mono:ui-monospace,"SF Mono","JetBrains Mono",Menlo,Consolas,monospace;
-}
-*{box-sizing:border-box;margin:0;padding:0}
-body{background:var(--bg);color:var(--ink);font-family:var(--mono);
-  min-height:100dvh;padding-bottom:60px}
+/* base tokens come from lab.css */
+:root{ --faint:#1f232d;--accent:#22d3ee; }
+*{margin:0;padding:0}
+body{min-height:100dvh;padding-bottom:60px}
 header{display:flex;align-items:center;gap:12px;padding:14px 20px;
   border-bottom:1px solid var(--line);
   background:linear-gradient(180deg,rgba(34,211,238,.06),transparent)}

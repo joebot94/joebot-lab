@@ -167,18 +167,12 @@ MTX12800_HTML = r"""<!doctype html>
 <meta charset="utf-8"/>
 <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no"/>
 <title>Joebot Lab · Matrix 12800</title>
+<link rel="stylesheet" href="/static/lab.css"/>
 <style>
-  :root{
-    --bg:#0c0e12;--panel:#15181f;--panel2:#1b1f28;--line:#262b36;
-    --ink:#e8ebf0;--muted:#8b93a3;--accent:#e0a040;
-    --ok:#34d399;--warn:#f5b942;--bad:#ff5470;--gray:#454b58;
-    --staged:#e0a040;
-    --mono:ui-monospace,"SF Mono","JetBrains Mono",Menlo,Consolas,monospace;
-  }
-  *{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
-  body{margin:0;background:var(--bg);color:var(--ink);
-    font-family:var(--mono);font-size:14px;
-    height:100dvh;display:flex;flex-direction:column;overflow:hidden}
+  /* base tokens come from lab.css */
+  :root{ --staged:#e0a040; }
+  *{-webkit-tap-highlight-color:transparent}
+  body{font-size:14px;height:100dvh;display:flex;flex-direction:column;overflow:hidden}
 
   /* header */
   header{display:flex;align-items:center;gap:10px;flex-wrap:nowrap;

@@ -183,19 +183,16 @@ SMX_HTML = r"""<!doctype html>
 <meta charset="utf-8"/>
 <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no"/>
 <title>Joebot Lab · SMX</title>
+<link rel="stylesheet" href="/static/lab.css"/>
 <style>
+  /* base tokens + toast come from lab.css; page adds plane accent colors */
   :root{
-    --bg:#0c0e12;--panel:#15181f;--panel2:#1b1f28;--line:#262b36;
-    --ink:#e8ebf0;--muted:#8b93a3;
-    --ok:#34d399;--warn:#f5b942;--bad:#ff5470;--gray:#454b58;
-    --mono:ui-monospace,"SF Mono","JetBrains Mono",Menlo,Consolas,monospace;
+    --accent:#a78bfa;
     --c-vga:#4fa3e0;--c-svid:#e06b4f;--c-vid:#4fe08a;--c-aud:#c46fe0;
     --c-active:var(--c-vga);
   }
-  *{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
-  body{margin:0;background:var(--bg);color:var(--ink);
-    font-family:var(--mono);font-size:14px;
-    height:100dvh;display:flex;flex-direction:column;overflow:hidden}
+  *{-webkit-tap-highlight-color:transparent}
+  body{font-size:14px;height:100dvh;display:flex;flex-direction:column;overflow:hidden}
 
   header{display:flex;align-items:center;gap:10px;padding:8px 14px;flex-shrink:0;
     border-bottom:1px solid var(--line);
@@ -361,10 +358,6 @@ SMX_HTML = r"""<!doctype html>
   .mfbtn-ok{background:rgba(52,211,153,.1);color:var(--ok);
     border:1px solid rgba(52,211,153,.35)}
   .mfbtn-cl{background:var(--panel2);color:var(--muted);border:1px solid var(--line)}
-  .toast{position:fixed;bottom:20px;right:20px;background:var(--panel2);
-    border:1px solid var(--line);border-radius:8px;padding:9px 15px;
-    font-size:12px;opacity:0;transition:opacity .25s;pointer-events:none;z-index:200}
-  .toast.show{opacity:1}
 
   @media(max-width:600px){
     .pbtn{min-width:60px;font-size:11px;padding:7px 4px}

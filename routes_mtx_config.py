@@ -125,17 +125,11 @@ MTX_HTML = r"""<!doctype html>
 <meta charset="utf-8"/>
 <meta name="viewport" content="width=device-width, initial-scale=1"/>
 <title>Joebot Lab · MTX Editor</title>
+<link rel="stylesheet" href="/static/lab.css"/>
 <style>
-  :root{
-    --bg:#0c0e12;--panel:#15181f;--panel2:#1b1f28;--line:#262b36;
-    --ink:#e8ebf0;--muted:#8b93a3;--accent:#e0a040;
-    --ok:#34d399;--warn:#f5b942;--bad:#ff5470;--gray:#454b58;
-    --blue:#3b82f6;--blue-dim:rgba(59,130,246,.12);
-    --mono:ui-monospace,"SF Mono","JetBrains Mono",Menlo,Consolas,monospace;
-  }
-  *{box-sizing:border-box}
-  body{margin:0;background:var(--bg);color:var(--ink);
-    font-family:var(--mono);font-size:14px;line-height:1.5;padding-bottom:60px}
+  /* base tokens come from lab.css; page overrides blue accent */
+  :root{ --blue:#3b82f6;--blue-dim:rgba(59,130,246,.12); }
+  body{font-size:14px;padding-bottom:60px}
   header{display:flex;align-items:center;gap:14px;flex-wrap:wrap;
     padding:14px 20px;border-bottom:1px solid var(--line);
     background:linear-gradient(180deg,rgba(59,130,246,.05),transparent)}

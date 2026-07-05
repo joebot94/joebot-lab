@@ -148,15 +148,12 @@ IR_HUB_HTML = r"""<!doctype html>
 <meta charset="utf-8"/>
 <meta name="viewport" content="width=device-width,initial-scale=1"/>
 <title>Joebot Lab · IR Remotes</title>
+<link rel="stylesheet" href="/static/lab.css"/>
 <style>
-:root{
-  --bg:#0c0e12;--panel:#15181f;--panel2:#1b1f28;--line:#262b36;
-  --ink:#e8ebf0;--muted:#8b93a3;--accent:#e05a1a;
-  --ok:#34d399;--warn:#f5b942;--bad:#ff5470;
-  --mono:ui-monospace,"SF Mono","JetBrains Mono",Menlo,Consolas,monospace;
-}
-*{box-sizing:border-box;margin:0;padding:0}
-body{background:var(--bg);color:var(--ink);font-family:var(--mono);min-height:100dvh}
+/* base tokens come from lab.css */
+:root{ --accent:#e05a1a; }
+*{margin:0;padding:0}
+body{min-height:100dvh}
 header{display:flex;align-items:center;gap:14px;padding:14px 22px;
   border-bottom:1px solid var(--line);
   background:linear-gradient(180deg,rgba(224,90,26,.06),transparent)}
@@ -223,17 +220,12 @@ IR_REMOTE_HTML = r"""<!doctype html>
 <meta charset="utf-8"/>
 <meta name="viewport" content="width=device-width,initial-scale=1"/>
 <title>Joebot Lab · IR Remote</title>
+<link rel="stylesheet" href="/static/lab.css"/>
 <style>
-:root{
-  --bg:#0c0e12;--panel:#15181f;--panel2:#1b1f28;--line:#262b36;
-  --ink:#e8ebf0;--muted:#8b93a3;
-  --ok:#34d399;--warn:#f5b942;--bad:#ff5470;--gray:#454b58;
-  --accent:#e05a1a;
-  --mono:ui-monospace,"SF Mono","JetBrains Mono",Menlo,Consolas,monospace;
-}
-*{box-sizing:border-box;margin:0;padding:0;-webkit-tap-highlight-color:transparent}
-body{background:var(--bg);color:var(--ink);font-family:var(--mono);min-height:100dvh;
-  display:flex;flex-direction:column}
+/* base tokens come from lab.css */
+:root{ --accent:#e05a1a; }
+*{margin:0;padding:0;-webkit-tap-highlight-color:transparent}
+body{min-height:100dvh;display:flex;flex-direction:column}
 header{display:flex;align-items:center;gap:14px;padding:14px 22px;
   border-bottom:1px solid var(--line);
   background:linear-gradient(180deg,rgba(224,90,26,.06),transparent);flex-shrink:0}
