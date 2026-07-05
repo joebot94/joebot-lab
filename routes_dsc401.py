@@ -9,13 +9,15 @@ URIs: session-specific hashed paths extracted from /www/main-es2018.js
 
 import base64
 import json
+import mimetypes
 import re
 import socket
 import ssl
 import threading
 import time
+import uuid
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Body, File, Form, UploadFile
 from fastapi.responses import HTMLResponse, JSONResponse
 
 router = APIRouter()
@@ -44,7 +46,7 @@ def _ssl_ctx() -> ssl.SSLContext:
     ctx.set_alpn_protocols(["http/1.1"])
     return ctx
 
-def _https_request(host: str, method: str, path: str, headers: dict, timeout: int = SOCK_TO) -> tuple[int, dict, bytes]:
+def _https_request(host: str, method: str, path: str, headers: dict, timeout: int = SOCK_TO, body: bytes = b"") -> tuple[int, dict, bytes]:
     """Raw socket HTTPS request — avoids http.client quirks with this device."""
     ctx = _ssl_ctx()
     try:
@@ -52,7 +54,7 @@ def _https_request(host: str, method: str, path: str, headers: dict, timeout: in
         ssock = ctx.wrap_socket(sock, server_hostname=host)
         hdr_lines = "\r\n".join(f"{k}: {v}" for k, v in headers.items())
         req = f"{method} {path} HTTP/1.1\r\nHost: {host}\r\nUser-Agent: JoebotLab/2.10\r\nAccept: */*\r\n{hdr_lines}\r\nConnection: close\r\n\r\n"
-        ssock.sendall(req.encode())
+        ssock.sendall(req.encode() + body)
         # Read full response
         buf = b""
         ssock.settimeout(timeout)
@@ -263,6 +265,136 @@ def api_dsc401_status():
     results = [f.result() for f in futures]
     return JSONResponse(results)
 
+def _build_logo_multipart(remote_filename: str, file_bytes: bytes, content_type: str, base_name: str) -> tuple[bytes, str]:
+    boundary = "----JoebotDSCUpload" + uuid.uuid4().hex
+    def field(name, value):
+        return (f"--{boundary}\r\nContent-Disposition: form-data; name=\"{name}\"\r\n\r\n{value}\r\n").encode()
+    body = b""
+    body += field("nortxe_filename", remote_filename)
+    body += field("nortxe_options", "as_json")
+    body += (
+        f"--{boundary}\r\nContent-Disposition: form-data; name=\"nortxe_file\"; filename=\"{base_name}\"\r\n"
+        f"Content-Type: {content_type}\r\n\r\n"
+    ).encode()
+    body += file_bytes + b"\r\n"
+    body += f"--{boundary}--\r\n".encode()
+    return body, f"multipart/form-data; boundary={boundary}"
+
+def _sis_logo(host: str, commands: list[str], timeout: float = 8.0) -> list[str]:
+    """Send ESC-prefixed SIS logo commands over raw TCP port 23 with password auth."""
+    results = []
+    try:
+        s = socket.create_connection((host, 23), timeout=timeout)
+        s.settimeout(0.4)
+        # Drain banner
+        buf = b""
+        deadline = time.time() + 1.0
+        while time.time() < deadline:
+            try:
+                chunk = s.recv(4096)
+                if not chunk: break
+                buf += chunk
+            except socket.timeout:
+                break
+        # Auth if prompted
+        if b"password" in buf.lower():
+            s.sendall((CREDS[1] + "\r").encode())
+            time.sleep(0.4)
+            deadline = time.time() + 1.0
+            while time.time() < deadline:
+                try:
+                    if not s.recv(4096): break
+                except socket.timeout:
+                    break
+        # Send each command
+        for cmd in commands:
+            s.sendall(b"\x1b" + cmd.encode("ascii", errors="replace") + b"\r")
+            time.sleep(0.25)
+            resp = b""
+            deadline = time.time() + 1.2
+            while time.time() < deadline:
+                try:
+                    chunk = s.recv(4096)
+                    if not chunk: break
+                    resp += chunk
+                    deadline = time.time() + 0.15
+                except socket.timeout:
+                    break
+            # Strip banner noise
+            lines = [ln.strip() for ln in resp.decode("ascii", errors="replace").replace("\r", "\n").split("\n") if ln.strip()]
+            clean = [ln for ln in lines if not any(x in ln.lower() for x in ["copyright", "extron electronics", "login administrator", "password:"])]
+            results.append("\n".join(clean) if clean else resp.decode("ascii", errors="replace").strip())
+        s.close()
+    except Exception as e:
+        results.append(f"ERROR: {e}")
+    return results
+
+@router.post("/api/dsc401/logo/upload")
+async def api_dsc401_logo_upload(
+    host: str = Form(...),
+    slot: int = Form(1),
+    folder: str = Form("Graphics"),
+    use_folder: bool = Form(True),
+    show_after: bool = Form(True),
+    file: UploadFile = File(...),
+):
+    logs: list[str] = []
+    def log(msg): logs.append(msg); _log(msg)
+    try:
+        file_bytes = await file.read()
+        base_name = file.filename or "logo.png"
+        ct = file.content_type or mimetypes.guess_type(base_name)[0] or "application/octet-stream"
+        if use_folder and folder:
+            remote_filename = f"{folder.strip('/')}/{base_name}"
+            sis_filename = base_name
+        else:
+            remote_filename = base_name
+            sis_filename = f"/{base_name}"
+        log(f"Device: {host}")
+        log(f"Upload → /{remote_filename}  SIS name: {sis_filename}  Slot: {slot}")
+        session = _login(host)
+        if not session:
+            log("ERROR: web login failed")
+            return JSONResponse({"ok": False, "logs": logs})
+        log("Web login OK.")
+        body, multipart_ct = _build_logo_multipart(remote_filename, file_bytes, ct, base_name)
+        log(f"Uploading {len(file_bytes):,} bytes…")
+        status, _, resp_body = _https_request(host, "POST", "/upload", {
+            "Cookie": f"NortxeSession={session}",
+            "Content-Type": multipart_ct,
+            "Content-Length": str(len(body)),
+            "X-Requested-With": "XMLHttpRequest",
+            "Origin": f"https://{host}",
+            "Referer": f"https://{host}/www/index.html",
+        }, timeout=20, body=body)
+        resp_text = resp_body.decode("utf-8", errors="replace")
+        if status == 200 and '"success": true' in resp_text:
+            log(f"Upload OK (HTTP {status})")
+        else:
+            log(f"Upload warning HTTP {status}: {resp_text[:300]}")
+        cmds = [f"A{slot},{sis_filename}LOGO", f"A{slot}LOGO"]
+        labels = [f"Assign slot {slot}", f"Verify slot {slot}"]
+        if show_after:
+            cmds += [f"E1*{slot}LOGO", "ELOGO"]
+            labels += [f"Enable slot {slot}", "Query enabled"]
+        log("Sending SIS commands…")
+        for label, resp in zip(labels, _sis_logo(host, cmds)):
+            log(f"  {label}: {resp}")
+        log("Done.")
+        return JSONResponse({"ok": True, "logs": logs})
+    except Exception as e:
+        logs.append(f"ERROR: {e}")
+        return JSONResponse({"ok": False, "logs": logs})
+
+@router.post("/api/dsc401/logo/sis")
+async def api_dsc401_logo_sis(body: dict = Body(...)):
+    host = body.get("host", "")
+    commands = body.get("commands", [])
+    if not host or not commands:
+        return JSONResponse({"ok": False, "error": "host and commands required"})
+    results = _sis_logo(host, commands)
+    return JSONResponse({"ok": True, "results": results})
+
 @router.get("/control/dsc401", response_class=HTMLResponse)
 def page_dsc401():
     return HTMLResponse(DSC401_HTML)
@@ -430,6 +562,124 @@ async function poll(){
 // Auto-poll every 15s
 poll();
 setInterval(()=>{if(Date.now()-_lastPoll>14000)poll();},5000);
+</script>
+
+<!-- ─── LOGO MANAGER ─────────────────────────────────────────────────── -->
+<style>
+.lm{margin:0 20px 24px;background:#1e293b;border:1px solid #334155;border-radius:12px;overflow:hidden}
+.lm-head{background:#0f172a;padding:11px 16px;display:flex;align-items:center;gap:10px;border-bottom:1px solid #334155}
+.lm-head h2{font-size:.9rem;font-weight:700;color:#e2e8f0;margin:0}
+.lm-head .badge{background:#7c3aed;color:#fff;font-size:.65rem;font-weight:700;padding:2px 7px;border-radius:20px}
+.lm-body{padding:16px}
+.lm-row{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:10px}
+.lm-row label{color:#94a3b8;font-size:.78rem;white-space:nowrap;min-width:56px}
+.lm-sel,.lm-inp{background:#0f172a;border:1px solid #334155;color:#e2e8f0;border-radius:6px;padding:5px 9px;font-size:.8rem;font-family:inherit}
+.lm-sel:focus,.lm-inp:focus{outline:none;border-color:#60a5fa}
+.lm-file{background:#0f172a;border:1px solid #334155;color:#94a3b8;border-radius:6px;padding:4px 8px;font-size:.78rem;cursor:pointer;flex:1}
+.lm-file::file-selector-button{background:#1d4ed8;color:#fff;border:none;padding:3px 10px;border-radius:4px;font-size:.75rem;cursor:pointer;margin-right:8px}
+.lm-cb{display:flex;align-items:center;gap:5px;color:#94a3b8;font-size:.78rem;cursor:pointer;white-space:nowrap}
+.lm-cb input{accent-color:#60a5fa}
+.lm-btns{display:flex;gap:8px;flex-wrap:wrap;margin:12px 0 10px}
+.lm-btn{background:#1d4ed8;color:#fff;border:none;padding:7px 14px;border-radius:7px;font-size:.78rem;font-weight:700;cursor:pointer;font-family:inherit;white-space:nowrap}
+.lm-btn:hover{background:#2563eb}
+.lm-btn.sec{background:#334155;color:#cbd5e1}
+.lm-btn.sec:hover{background:#475569}
+.lm-btn.red{background:#7f1d1d;color:#fca5a5}
+.lm-btn.red:hover{background:#991b1b}
+.lm-log{width:100%;background:#0f172a;border:1px solid #334155;border-radius:7px;color:#4ade80;font-family:'JetBrains Mono','Fira Code',ui-monospace,monospace;font-size:.73rem;padding:10px;resize:vertical;min-height:120px;line-height:1.55}
+</style>
+<div class="lm">
+  <div class="lm-head">
+    <h2>Logo Manager</h2>
+    <span class="badge">SIS + HTTPS</span>
+  </div>
+  <div class="lm-body">
+    <div class="lm-row">
+      <label>Device</label>
+      <select class="lm-sel" id="lm-device">
+        <option value="10.0.0.41">DSC 401 #1 — 10.0.0.41</option>
+        <option value="10.0.0.42">DSC 401 #2 — 10.0.0.42</option>
+        <option value="10.0.0.43">DSC 401 #3 — 10.0.0.43</option>
+        <option value="10.0.0.44">DSC 401 #4 — 10.0.0.44</option>
+      </select>
+    </div>
+    <div class="lm-row">
+      <label>Image</label>
+      <input type="file" class="lm-file" id="lm-file" accept=".png,.jpg,.jpeg,.bmp,.gif">
+    </div>
+    <div class="lm-row">
+      <label>Slot</label>
+      <input type="number" class="lm-inp" id="lm-slot" value="1" min="1" max="16" style="width:60px">
+      <label class="lm-cb"><input type="checkbox" id="lm-use-folder" checked onchange="lmFolderToggle()"> /Graphics folder</label>
+      <input type="text" class="lm-inp" id="lm-folder" value="Graphics" style="width:100px">
+      <label class="lm-cb"><input type="checkbox" id="lm-show-after" checked> Show after assign</label>
+    </div>
+    <div class="lm-btns">
+      <button class="lm-btn" onclick="lmUpload()">⬆ Upload + Assign</button>
+      <button class="lm-btn sec" onclick="lmPollSlots()">🔍 Poll Slots 1-16</button>
+      <button class="lm-btn sec" onclick="lmSis(['QLOGO'])">📋 Availability</button>
+      <button class="lm-btn sec" onclick="lmSis(['ELOGO'])">👁 Enabled Logo</button>
+      <button class="lm-btn red" onclick="lmSis(['E1*0LOGO'])">✕ Disable Logo</button>
+    </div>
+    <textarea class="lm-log" id="lm-log" readonly placeholder="Log output will appear here…"></textarea>
+  </div>
+</div>
+<script>
+function lmLog(msg){
+  const el=document.getElementById('lm-log');
+  el.value+=(el.value?'\\n':'')+msg;
+  el.scrollTop=el.scrollHeight;
+}
+function lmClear(){document.getElementById('lm-log').value='';}
+function lmFolderToggle(){
+  document.getElementById('lm-folder').disabled=!document.getElementById('lm-use-folder').checked;
+}
+
+async function lmUpload(){
+  const fileEl=document.getElementById('lm-file');
+  if(!fileEl.files.length){lmLog('Pick an image file first.');return;}
+  lmClear();
+  lmLog('Starting upload…');
+  const fd=new FormData();
+  fd.append('host',document.getElementById('lm-device').value);
+  fd.append('slot',document.getElementById('lm-slot').value);
+  fd.append('folder',document.getElementById('lm-folder').value);
+  fd.append('use_folder',document.getElementById('lm-use-folder').checked?'true':'false');
+  fd.append('show_after',document.getElementById('lm-show-after').checked?'true':'false');
+  fd.append('file',fileEl.files[0]);
+  try{
+    const r=await fetch('/api/dsc401/logo/upload',{method:'POST',body:fd});
+    const j=await r.json();
+    (j.logs||[]).forEach(lmLog);
+  }catch(e){lmLog('Fetch error: '+e.message);}
+}
+
+async function lmPollSlots(){
+  lmClear();
+  const host=document.getElementById('lm-device').value;
+  lmLog('Polling slots 1-16 on '+host+'…');
+  const cmds=[...Array(16)].map((_,i)=>`A${i+1}LOGO`);
+  try{
+    const r=await fetch('/api/dsc401/logo/sis',{method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({host,commands:cmds})});
+    const j=await r.json();
+    (j.results||[]).forEach((resp,i)=>lmLog(`Slot ${String(i+1).padStart(2,' ')}: ${resp||'—'}`));
+  }catch(e){lmLog('Error: '+e.message);}
+}
+
+async function lmSis(commands){
+  lmClear();
+  const host=document.getElementById('lm-device').value;
+  lmLog('SIS → '+host+': '+commands.join(', '));
+  try{
+    const r=await fetch('/api/dsc401/logo/sis',{method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({host,commands})});
+    const j=await r.json();
+    (j.results||[]).forEach((resp,i)=>lmLog(`  [${commands[i]}]: ${resp||'(empty)'}`));
+  }catch(e){lmLog('Error: '+e.message);}
+}
 </script>
 </body>
 </html>"""

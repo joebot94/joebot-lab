@@ -63,9 +63,8 @@ ALL_MODULES = [
     {
         "id": "autoswitch",
         "name": "Auto-Switching",
-        "desc": "Signal-aware automatic routing rules — when input goes active, fire a command chain.",
+        "desc": "Signal-aware automatic routing rules — when input goes active, route it automatically.",
         "icon": "🤖",
-        "badge": "coming soon",
     },
     {
         "id": "virtual_presets",

@@ -277,6 +277,7 @@ def _startup():
     log("dashboard starting")
     _prime_state()
     threading.Thread(target=_poll_loop, daemon=True).start()
+    _start_autoswitch()
 
 
 @app.get("/api/status")
@@ -1092,6 +1093,9 @@ FRONTEND_HTML = r"""<!doctype html>
   <button class="toggle" id="btn-sound" title="Toggle sound alerts">🔕 Sound</button>
   <button class="toggle" id="btn-expand">Expand all</button>
   <button class="toggle" id="btn-logs">Logs</button>
+  <a href="/control/autoswitch" style="text-decoration:none">
+    <button class="toggle">🤖 Auto-Switch</button>
+  </a>
   <a href="/config" style="text-decoration:none">
     <button class="toggle">⚙ Config</button>
   </a>
@@ -1259,11 +1263,16 @@ function devBody(d){
           padding:6px 14px;font-size:12.5px;width:100%">🗂 MTX Editor →</button>
       </a></div>`;}
   if(d.kind==='smx'){
-    h+=`<div style="margin-top:10px;padding-top:8px;border-top:1px solid var(--line)">
-      <a href="/control/smx" style="text-decoration:none">
+    h+=`<div style="margin-top:10px;padding-top:8px;border-top:1px solid var(--line);display:flex;gap:6px">
+      <a href="/control/smx" style="text-decoration:none;flex:1">
         <button style="font-family:var(--mono);cursor:pointer;background:rgba(124,106,245,.1);
           color:#a78bfa;border:1px solid rgba(124,106,245,.35);border-radius:7px;
           padding:6px 14px;font-size:12.5px;width:100%">⚡ Route SMX →</button>
+      </a>
+      <a href="/control/autoswitch" style="text-decoration:none;flex:1">
+        <button style="font-family:var(--mono);cursor:pointer;background:rgba(52,211,153,.08);
+          color:#34d399;border:1px solid rgba(52,211,153,.3);border-radius:7px;
+          padding:6px 14px;font-size:12.5px;width:100%">🤖 Auto-Switch →</button>
       </a></div>`;}
   if(d.kind==='ipcp505'){
     h+=`<div style="margin-top:10px;padding-top:8px;border-top:1px solid var(--line)">
@@ -1271,6 +1280,13 @@ function devBody(d){
         <button style="font-family:var(--mono);cursor:pointer;background:rgba(245,185,66,.08);
           color:#f5b942;border:1px solid rgba(245,185,66,.3);border-radius:7px;
           padding:6px 14px;font-size:12.5px;width:100%">⚡ Control IPCP →</button>
+      </a></div>`;}
+  if(d.kind==='dsc401a'){
+    h+=`<div style="margin-top:10px;padding-top:8px;border-top:1px solid var(--line)">
+      <a href="/control/dsc401" style="text-decoration:none">
+        <button style="font-family:var(--mono);cursor:pointer;background:rgba(29,78,216,.1);
+          color:#93c5fd;border:1px solid rgba(29,78,216,.35);border-radius:7px;
+          padding:6px 14px;font-size:12.5px;width:100%">📺 DSC 401 Monitor →</button>
       </a></div>`;}
 
   return h;
@@ -1513,15 +1529,16 @@ WELCOME_HTML = '<!doctype html>\n<html lang="en"><head>\n<meta charset="utf-8"/>
 # --------------------------------------------------------------------------- #
 # Route modules
 # --------------------------------------------------------------------------- #
-from routes_dms        import router as _dms_router
-from routes_mtx_config import router as _mtx_config_router
-from routes_matrix12800 import router as _matrix12800_router
-from routes_smx        import router as _smx_router
-from routes_ipcp505    import router as _ipcp505_router
-from routes_ir         import router as _ir_router
-from routes_vsc        import router as _vsc_router
-from routes_mtpx       import router as _mtpx_router
-from routes_dsc401     import router as _dsc401_router
+from routes_dms          import router as _dms_router
+from routes_mtx_config   import router as _mtx_config_router
+from routes_matrix12800  import router as _matrix12800_router
+from routes_smx          import router as _smx_router
+from routes_ipcp505      import router as _ipcp505_router
+from routes_ir           import router as _ir_router
+from routes_vsc          import router as _vsc_router
+from routes_mtpx         import router as _mtpx_router
+from routes_dsc401       import router as _dsc401_router
+from routes_autoswitch   import router as _autoswitch_router, start_engine as _start_autoswitch
 
 app.include_router(_dms_router)
 app.include_router(_mtx_config_router)
@@ -1532,6 +1549,7 @@ app.include_router(_ir_router)
 app.include_router(_vsc_router)
 app.include_router(_mtpx_router)
 app.include_router(_dsc401_router)
+app.include_router(_autoswitch_router)
 
 
 if __name__ == "__main__":
