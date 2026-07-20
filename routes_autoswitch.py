@@ -58,6 +58,14 @@ def _defaults() -> dict:
 # poll is often just a dropped TCP handshake; don't flap offline/online on it.
 OFFLINE_AFTER_MISSES = 3
 
+# Kinds the engine can drive. "smx" is the multi-plane special case; the rest
+# are treated as single-plane crosspoints speaking standard SIS:
+#   tie {in}*{out}!   ·   signal presence 0LS bitmap   ·   preset recall {n}.
+# (tie verified on DMS 3600 + Matrix 12800; 0LS bitmap verified on DMS 3600,
+# standard-SIS-but-unverified elsewhere — a device that never answers 0LS just
+# reads as unreachable to the engine. extron_info covers MTPX/SW4/DVS gear.)
+ROUTABLE_KINDS = {"smx", "dms3600", "matrix12800", "extron_info"}
+
 
 def _load() -> dict:
     try:
@@ -228,13 +236,21 @@ class _Engine:
 
     # ── connection management ────────────────────────────────────────────────
 
+    def _dev(self, device_id: str) -> Optional[dict]:
+        devices = config_store.get_devices()
+        return next(
+            (d for d in devices
+             if d["id"] == device_id and d.get("kind") in ROUTABLE_KINDS),
+            None,
+        )
+
+    def _kind(self, device_id: str) -> str:
+        dev = self._dev(device_id)
+        return dev.get("kind", "") if dev else ""
+
     def _conn(self, device_id: str) -> Optional[_SMXConn]:
         if device_id not in self._conns:
-            devices = config_store.get_devices()
-            dev = next(
-                (d for d in devices if d["id"] == device_id and d.get("kind") == "smx"),
-                None,
-            )
+            dev = self._dev(device_id)
             if not dev:
                 return None
             self._conns[device_id] = _SMXConn(dev["ip"])
@@ -285,6 +301,8 @@ class _Engine:
         conn = self._conn(device_id)
         if not conn:
             return None
+        if self._kind(device_id) != "smx":
+            return self._poll_active_crosspoint(conn)
         slots = self._slot_inputs(device_id)
         if not slots:
             return None
@@ -305,6 +323,20 @@ class _Engine:
                             active.add(global_base + local_idx)
             global_base += n_inputs
         return active if got_response else None
+
+    @staticmethod
+    def _poll_active_crosspoint(conn: _SMXConn) -> Optional[Set[int]]:
+        """Single-plane crosspoint signal presence: 0LS returns a bitmap like
+        "110100…", one digit per input, '1' = signal present (verified on
+        DMS 3600). Take the longest 0/1 run so command echo digits never win."""
+        resp = conn.send("0LS")
+        if not resp:
+            return None
+        runs = re.findall(r"[01]{2,}", resp)
+        if not runs:
+            return None
+        bitmap = max(runs, key=len)
+        return {i for i, ch in enumerate(bitmap, start=1) if ch == "1"}
 
     def _effective_active(self, device_id: str, raw_active: Set[int], now: float,
                           fire_debounce: float, release_delay: float) -> Set[int]:
@@ -334,6 +366,8 @@ class _Engine:
 
     def _query_freq(self, device_id: str, global_input: int) -> Optional[str]:
         """Query sync frequency for a specific input. Returns '15kHz', '31kHz', or None."""
+        if self._kind(device_id) != "smx":
+            return None  # slot-based freq query is SMX-only; unknown → rules pass
         loc = self._global_to_slot_local(device_id, global_input)
         if not loc:
             return None
@@ -373,25 +407,36 @@ class _Engine:
             return
         inp = src["input"]
         out = dst["output"]
-        # Destination may limit which planes it takes (breakaway routing);
-        # default is all planes so the console goes everywhere it should.
-        planes = dst.get("planes") or self.SMX_PLANES
-        resps = [conn.send(f"{p}*{inp}*{out}!") for p in planes]
+        if self._kind(device_id) == "smx":
+            # Destination may limit which planes it takes (breakaway routing);
+            # default is all planes so the console goes everywhere it should.
+            planes = dst.get("planes") or self.SMX_PLANES
+            resps = [conn.send(f"{p}*{inp}*{out}!") for p in planes]
+            detail = f"{inp}*{out} on {len(planes)} planes"
+            log_detail = f"planes {planes} → {resps!r}"
+        else:
+            # Single-plane crosspoint: standard SIS tie
+            resps = [conn.send(f"{inp}*{out}!")]
+            detail = f"{inp}*{out}"
+            log_detail = f"→ {resps!r}"
         self._current_route[dst["id"]] = src["id"]
         self.last_event = f"{src['name']} → {dst['name']}"
         self.last_event_time = time.time()
         _save_state({"last_event": self.last_event, "last_event_time": self.last_event_time})
-        self._event("fire", f"{src['name']} → {dst['name']}  ({inp}*{out} on {len(planes)} planes)")
-        log(f"autoswitch: {self.last_event}  (planes {planes} → {resps!r})")
+        self._event("fire", f"{src['name']} → {dst['name']}  ({detail})")
+        log(f"autoswitch: {self.last_event}  ({log_detail})")
 
     def _preset(self, device_id: str, preset_num: int, src_name: str):
         conn = self._conn(device_id)
         if not conn:
             log(f"autoswitch: no connection for preset device {device_id}")
             return
-        # SMX global preset recall is Rpr{nn} (verified in smx_control.py),
-        # not the {n}. form used by DMS/Matrix units.
-        resp = conn.send(f"Rpr{preset_num:02d}")
+        # SMX global preset recall is Rpr{nn} (verified in smx_control.py);
+        # DMS/Matrix/generic units use the universal {n}. form.
+        if self._kind(device_id) == "smx":
+            resp = conn.send(f"Rpr{preset_num:02d}")
+        else:
+            resp = conn.send(f"{preset_num}.")
         self.last_event = f"{src_name} → preset {preset_num}"
         self.last_event_time = time.time()
         _save_state({"last_event": self.last_event, "last_event_time": self.last_event_time})
@@ -579,6 +624,10 @@ class _Engine:
                 if self.last_event_time else None
             ),
             "active_inputs": {k: sorted(v) for k, v in self._active.items()},
+            "last_active": {
+                dev: {str(inp): round(time.time() - t) for inp, t in last.items()}
+                for dev, last in self._last_seen.items()
+            },
             "device_status": dict(self._device_ok),
             "current_routes": routes,
             "errors": self.recent_errors[-5:],
@@ -888,6 +937,33 @@ main{max-width:1100px;margin:0 auto;padding:18px 16px}
 .dot.sq{border-radius:2px;background:var(--purple)}
 .dot.sq.held{background:var(--amber);box-shadow:0 0 5px rgba(252,211,77,.5)}
 
+/* ── live signal-flow panel ── */
+.flow-card{background:var(--panel);border:1px solid var(--line);border-radius:10px;
+  padding:12px 16px 8px;margin-bottom:12px;position:relative;overflow:hidden}
+.flow-card::after{content:'';position:absolute;inset:0;pointer-events:none;
+  background:repeating-linear-gradient(0deg,
+    transparent,transparent 2px,rgba(0,0,0,.10) 2px,rgba(0,0,0,.10) 4px)}
+.flow-card.blind #flow-svg-wrap{opacity:.45;filter:saturate(.4)}
+.flow-head{display:flex;align-items:center;gap:10px;margin-bottom:4px}
+.flow-lbl{font-size:9px;letter-spacing:.14em;text-transform:uppercase;color:var(--muted)}
+.flow-live{font-size:10px;color:var(--ok)}
+#flow-svg-wrap svg{width:100%;height:auto;display:block}
+.fnode-txt{font-family:inherit;font-size:11px;fill:var(--ink);font-weight:700}
+.fnode-sub{font-size:8.5px;fill:var(--muted)}
+.wire{fill:none;stroke:var(--line);stroke-width:1.5}
+.wire.live{stroke:var(--ok);stroke-width:2;stroke-dasharray:7 5;
+  animation:dashflow 1s linear infinite;
+  filter:drop-shadow(0 0 4px rgba(52,211,153,.55))}
+@keyframes dashflow{to{stroke-dashoffset:-24}}
+.fdot{fill:var(--gray)}
+.fdot.on{fill:var(--ok);filter:drop-shadow(0 0 4px rgba(52,211,153,.8))}
+.fdot.dst{fill:var(--purple)}
+.fdot.dst.held{fill:var(--amber);filter:drop-shadow(0 0 4px rgba(252,211,77,.7))}
+
+/* pulse on active source dots in the list */
+.dot.on{animation:srcpulse 2s ease-in-out infinite}
+@keyframes srcpulse{50%{box-shadow:0 0 10px rgba(52,211,153,.9)}}
+
 .plane-row{display:flex;gap:6px;flex-wrap:wrap}
 .plane-cb{display:flex;align-items:center;gap:4px;font-size:10px;color:var(--muted);
   border:1px solid var(--line);border-radius:5px;padding:3px 7px;cursor:pointer;user-select:none}
@@ -1088,12 +1164,12 @@ main{max-width:1100px;margin:0 auto;padding:18px 16px}
         </div>
         <div>
           <div class="help-title">Engine</div>
-          <div class="help-text">Polls your SMX devices continuously. It only acts on <b>newly active</b> inputs — turning something on triggers rules. When a source goes dark, its held destinations are released. <b>Debounce</b> = signal must be on that long before rules fire (rides out console-boot sync flicker); <b>hold</b> = source must be dark that long before release (rides out brief dropouts). Pause anytime without losing config.</div>
+          <div class="help-text">Polls your switchers continuously — SMX (multi-plane) plus single-plane crosspoints like the DMS 3600 and Matrix 12800 (standard SIS tie + 0LS signal presence). It only acts on <b>newly active</b> inputs — turning something on triggers rules. When a source goes dark, its held destinations are released. <b>Debounce</b> = signal must be on that long before rules fire (rides out console-boot sync flicker); <b>hold</b> = source must be dark that long before release (rides out brief dropouts). Pause anytime without losing config.</div>
         </div>
       </div>
       <div class="help-tip">
         <span style="color:var(--ok)">Quick start:</span>
-        add your SMX in <a href="/config" style="color:var(--blue)">Config</a> with kind <code>smx</code> →
+        add your switcher (SMX, DMS 3600, Matrix 12800…) in <a href="/config" style="color:var(--blue)">Config</a> →
         add a source (name + input #) →
         add a destination (name + output # + mode) →
         create a rule → add actions → done.
@@ -1144,6 +1220,15 @@ main{max-width:1100px;margin:0 auto;padding:18px 16px}
     <div class="ev-feed" id="ev-feed"></div>
   </div>
 
+  <!-- Live signal flow -->
+  <div class="flow-card" id="flow-card" style="display:none">
+    <div class="flow-head">
+      <span class="flow-lbl">Signal flow</span>
+      <span class="flow-live" id="flow-live"></span>
+    </div>
+    <div id="flow-svg-wrap"></div>
+  </div>
+
   <div class="split">
     <!-- Sources -->
     <div class="panel">
@@ -1156,7 +1241,7 @@ main{max-width:1100px;margin:0 auto;padding:18px 16px}
           <div class="frow">
             <div class="ff"><label>Name</label>
               <input id="src-name" placeholder="Super Nintendo"/></div>
-            <div class="ff"><label>SMX device</label>
+            <div class="ff"><label>Switcher</label>
               <select id="src-device"></select></div>
           </div>
           <div class="frow">
@@ -1184,8 +1269,8 @@ main{max-width:1100px;margin:0 auto;padding:18px 16px}
           <div class="frow">
             <div class="ff"><label>Name</label>
               <input id="dst-name" placeholder='20" CRT'/></div>
-            <div class="ff"><label>SMX device</label>
-              <select id="dst-device"></select></div>
+            <div class="ff"><label>Switcher</label>
+              <select id="dst-device" onchange="syncPlaneRow()"></select></div>
           </div>
           <div class="frow">
             <div class="ff"><label>Output #</label>
@@ -1197,7 +1282,7 @@ main{max-width:1100px;margin:0 auto;padding:18px 16px}
               </select></div>
           </div>
           <div class="frow">
-            <div class="ff"><label>Planes (which signal layers this destination takes)</label>
+            <div class="ff" id="dst-planes-ff"><label>Planes (which signal layers this destination takes)</label>
               <div class="plane-row" id="dst-planes">
                 <label class="plane-cb"><input type="checkbox" value="00" checked/>VGA</label>
                 <label class="plane-cb"><input type="checkbox" value="01" checked/>S-Vid</label>
@@ -1240,7 +1325,7 @@ main{max-width:1100px;margin:0 auto;padding:18px 16px}
           <button class="btn btn-sm" style="border-style:dashed;color:var(--purple);border-color:rgba(167,139,250,.35)"
             onclick="addActionRow('route')">+ route to destination</button>
           <button class="btn btn-sm" style="border-style:dashed;color:var(--ok);border-color:rgba(52,211,153,.35)"
-            onclick="addActionRow('preset')">+ recall SMX preset</button>
+            onclick="addActionRow('preset')">+ recall preset</button>
         </div>
         <div class="frow" style="margin-top:2px">
           <button class="btn btn-ok btn-sm" onclick="saveRule()">Save rule</button>
@@ -1260,7 +1345,7 @@ main{max-width:1100px;margin:0 auto;padding:18px 16px}
 <script>
 let cfg = {sources:[], destinations:[], rules:[], engine:{enabled:true, poll_interval:2}};
 let status = {};
-let smxDevices = [];
+let switchers = [];
 
 async function load() {
   const [cfgR, stR, devR] = await Promise.all([
@@ -1271,7 +1356,9 @@ async function load() {
   cfg    = await cfgR.json();
   status = await stR.json();
   const devData = await devR.json();
-  smxDevices = (devData.devices || []).filter(d => d.kind === 'smx');
+  // Any routable switcher: SMX (multi-plane) plus single-plane crosspoints
+  switchers = (devData.devices || []).filter(d =>
+    ['smx','dms3600','matrix12800','extron_info'].includes(d.kind));
   render();
 }
 
@@ -1293,7 +1380,7 @@ function renderEngine() {
 
   // Per-device chips
   document.getElementById('dev-chips').innerHTML = Object.keys(devStatus).map(id => {
-    const name = smxDevices.find(d=>d.id===id)?.name || id;
+    const name = switchers.find(d=>d.id===id)?.name || id;
     const up = devStatus[id];
     return `<span class="dev-chip ${up?'up':'down'}">
       <span class="sdot ${up?'g':'r'}"></span>${esc(name)} ${up?'online':'UNREACHABLE'}</span>`;
@@ -1393,20 +1480,24 @@ function renderSources() {
   }
   el.innerHTML = cfg.sources.map(s => {
     const active = (status.active_inputs?.[s.device_id] || []).includes(s.input);
-    const devName = smxDevices.find(d=>d.id===s.device_id)?.name || s.device_id || '?';
+    const devName = switchers.find(d=>d.id===s.device_id)?.name || s.device_id || '?';
+    const lastAgo = status.last_active?.[s.device_id]?.[s.input];
+    const state = active
+      ? ' · <span style="color:var(--ok)">signal active</span>'
+      : (lastAgo != null ? ` · last active ${fmtAgo(lastAgo)}` : '');
     return `<div class="item">
       <div class="dot ${active?'on':'off'}"></div>
       <div class="item-body">
         <div class="iname">${esc(s.name)}</div>
-        <div class="isub">${esc(devName)} · input ${s.input}${active?' · <span style="color:var(--ok)">signal active</span>':''}</div>
+        <div class="isub">${esc(devName)} · input ${s.input}${state}</div>
       </div>
       <button class="ic del" onclick="deleteSrc('${s.id}')" title="Delete">✕</button>
     </div>`;
   }).join('');
 
-  document.getElementById('smx-hint-src').textContent = smxDevices.length
-    ? 'SMX: ' + smxDevices.map(d=>d.name+' ('+d.ip+')').join(', ')
-    : 'No SMX devices — add one in Config with kind "smx".';
+  document.getElementById('smx-hint-src').textContent = switchers.length
+    ? 'Switchers: ' + switchers.map(d=>d.name+' ('+d.ip+')').join(', ')
+    : 'No switchers — add your SMX / DMS / Matrix in Config.';
 }
 
 // ── destinations ──────────────────────────────────────────────────────────
@@ -1418,16 +1509,17 @@ function renderDests() {
   }
   const routeMap = Object.fromEntries((status.current_routes||[]).map(r=>[r.dest_id, r.source_name]));
   el.innerHTML = cfg.destinations.map(d => {
-    const devName = smxDevices.find(x=>x.id===d.device_id)?.name || d.device_id || '?';
+    const devName = switchers.find(x=>x.id===d.device_id)?.name || d.device_id || '?';
     const mode = d.mode || 'newest_wins';
     const held = routeMap[d.id];
     const modeBadge = mode === 'keep_current'
       ? `<span class="mode-badge">🔒 hold</span>` : '';
     const heldNote = held ? ` · <span style="color:var(--amber)">← ${esc(held)}</span>` : '';
-    // Plane chips: absent planes list = all four. Rendered on their own row
-    // so they never ragged-wrap into the device/output line.
+    // Plane chips: SMX only (crosspoints are single-plane). Absent planes
+    // list = all four. Own row so they never ragged-wrap into the sub line.
+    const isSmx = switchers.find(x=>x.id===d.device_id)?.kind === 'smx';
     const active = d.planes || PLANES.map(p=>p.code);
-    const planeChips = PLANES.map(p =>
+    const planeChips = !isSmx ? '' : PLANES.map(p =>
       `<span class="pl-chip ${active.includes(p.code)?'on':''}"
         title="Toggle ${p.name} plane for this destination"
         onclick="togglePlane('${d.id}','${p.code}')">${p.name}</span>`).join('');
@@ -1436,7 +1528,7 @@ function renderDests() {
       <div class="item-body">
         <div class="iname">${esc(d.name)}${modeBadge}</div>
         <div class="isub">${esc(devName)} · output ${d.output}${heldNote}</div>
-        <div class="pl-row">${planeChips}</div>
+        ${planeChips ? `<div class="pl-row">${planeChips}</div>` : ''}
       </div>
       <button class="ic" onclick="cycleMode('${d.id}','${mode}')" title="Toggle mode">⇄</button>
       <button class="ic del" onclick="deleteDst('${d.id}')" title="Delete">✕</button>
@@ -1475,7 +1567,7 @@ function renderRules() {
         return (i===0 ? '<span class="kw">→</span>' : '<span class="kw">+</span>') + dstChip;
       }
       if (a.type === 'preset') {
-        const devName = smxDevices.find(d=>d.id===a.device_id)?.name || 'SMX';
+        const devName = switchers.find(d=>d.id===a.device_id)?.name || 'switcher';
         return (i===0 ? '<span class="kw">→</span>' : '<span class="kw">+</span>') +
           `<span class="chip preset">▶ preset ${a.preset_num} on ${esc(devName)}</span>`;
       }
@@ -1507,17 +1599,91 @@ async function testRule(id) {
   load();
 }
 
+// ── live signal-flow diagram ──────────────────────────────────────────────
+function renderFlow() {
+  const card = document.getElementById('flow-card');
+  if (!cfg.sources.length || !cfg.destinations.length) {
+    card.style.display = 'none';
+    return;
+  }
+  card.style.display = 'block';
+
+  // Dim the whole diagram only when every polled device is dark — with mixed
+  // status the per-node dots already tell the story.
+  const devVals = Object.values(status.device_status || {});
+  const allDown = devVals.length > 0 && devVals.every(v => v === false);
+  card.classList.toggle('blind', allDown);
+
+  const held = Object.fromEntries((status.current_routes||[]).map(r=>[r.dest_id, r.source_id]));
+  document.getElementById('flow-live').textContent =
+    allDown ? '' : (Object.keys(held).length
+      ? Object.keys(held).length + ' live route' + (Object.keys(held).length>1?'s':'') : '');
+
+  // Geometry: sources left, destinations right, wires between
+  const W = 700, rowH = 34, pad = 14, lx = 8, rx = W - 8;
+  const rows = Math.max(cfg.sources.length, cfg.destinations.length);
+  const H = rows * rowH + pad * 2;
+  const sy = i => pad + rowH/2 + i*rowH +
+    (cfg.sources.length < rows ? (rows-cfg.sources.length)*rowH/2 : 0);
+  const dy = i => pad + rowH/2 + i*rowH +
+    (cfg.destinations.length < rows ? (rows-cfg.destinations.length)*rowH/2 : 0);
+  const srcY = Object.fromEntries(cfg.sources.map((s,i)=>[s.id, sy(i)]));
+  const dstY = Object.fromEntries(cfg.destinations.map((d,i)=>[d.id, dy(i)]));
+
+  // Wires: every enabled rule's route action is a faint potential path;
+  // currently-held routes draw on top, lit and flowing.
+  const wires = [], liveWires = [];
+  cfg.rules.filter(r=>r.enabled !== false).forEach(r => {
+    normActions(r).filter(a=>a.type==='route').forEach(a => {
+      if (srcY[r.source_id] == null || dstY[a.dest_id] == null) return;
+      wires.push([r.source_id, a.dest_id]);
+    });
+  });
+  Object.entries(held).forEach(([did, sid]) => {
+    if (srcY[sid] != null && dstY[did] != null) liveWires.push([sid, did]);
+  });
+  const path = (sid, did) => {
+    const y1 = srcY[sid], y2 = dstY[did], x1 = lx+150, x2 = rx-150;
+    const mx = (x1+x2)/2;
+    return `M ${x1} ${y1} C ${mx} ${y1}, ${mx} ${y2}, ${x2} ${y2}`;
+  };
+
+  const activeIn = status.active_inputs || {};
+  const svg = `<svg viewBox="0 0 ${W} ${H}" xmlns="http://www.w3.org/2000/svg">
+    ${wires.map(([s,d])=>`<path class="wire" d="${path(s,d)}"/>`).join('')}
+    ${liveWires.map(([s,d])=>`<path class="wire live" d="${path(s,d)}"/>`).join('')}
+    ${cfg.sources.map(s => {
+      const on = (activeIn[s.device_id]||[]).includes(s.input);
+      return `<circle class="fdot${on?' on':''}" cx="${lx+4}" cy="${srcY[s.id]}" r="4"/>
+        <text class="fnode-txt" x="${lx+14}" y="${srcY[s.id]+1}" dominant-baseline="middle">${esc(s.name)}</text>
+        <text class="fnode-sub" x="${lx+14}" y="${srcY[s.id]+13}">in ${s.input}</text>`;
+    }).join('')}
+    ${cfg.destinations.map(d => {
+      const isHeld = held[d.id] != null;
+      return `<rect class="fdot dst${isHeld?' held':''}" x="${rx-8}" y="${dstY[d.id]-4}" width="8" height="8" rx="2"/>
+        <text class="fnode-txt" x="${rx-14}" y="${dstY[d.id]+1}" text-anchor="end" dominant-baseline="middle">${esc(d.name)}</text>
+        <text class="fnode-sub" x="${rx-14}" y="${dstY[d.id]+13}" text-anchor="end">out ${d.output}</text>`;
+    }).join('')}
+  </svg>`;
+  document.getElementById('flow-svg-wrap').innerHTML = svg;
+}
+
 // ── render all ────────────────────────────────────────────────────────────
 function render() {
   renderEngine();
+  renderFlow();
   renderSources();
   renderDests();
   renderRules();
-  const smxOpts = smxDevices.map(d=>`<option value="${d.id}">${esc(d.name)} (${esc(d.ip)})</option>`).join('');
-  const noSmx = '<option value="">— no SMX devices —</option>';
+  const smxOpts = switchers.map(d=>`<option value="${d.id}">${esc(d.name)} (${esc(d.ip)})</option>`).join('');
+  const noSmx = '<option value="">— no switchers —</option>';
   ['src-device','dst-device'].forEach(id => {
-    document.getElementById(id).innerHTML = smxOpts || noSmx;
+    const el = document.getElementById(id);
+    const prev = el.value;  // keep the user's pick across the 4s refresh
+    el.innerHTML = smxOpts || noSmx;
+    if (prev && [...el.options].some(o=>o.value===prev)) el.value = prev;
   });
+  syncPlaneRow();
   document.getElementById('rule-src').innerHTML =
     cfg.sources.map(s=>`<option value="${s.id}">${esc(s.name)}</option>`).join('') ||
     '<option>— add a source first —</option>';
@@ -1546,14 +1712,23 @@ const PLANES = [
   {code:'02', name:'Video'}, {code:'04', name:'Audio'},
 ];
 
+// Planes only apply to SMX destinations — hide the row for crosspoints
+function syncPlaneRow() {
+  const kind = switchers.find(d=>d.id===document.getElementById('dst-device').value)?.kind;
+  document.getElementById('dst-planes-ff').style.display = kind === 'smx' ? '' : 'none';
+}
+
 async function addDest() {
   const name      = document.getElementById('dst-name').value.trim();
   const device_id = document.getElementById('dst-device').value;
   const output    = parseInt(document.getElementById('dst-output').value) || 1;
   const mode      = document.getElementById('dst-mode').value;
-  const planes    = [...document.querySelectorAll('#dst-planes input:checked')].map(cb=>cb.value);
+  const isSmx     = switchers.find(d=>d.id===device_id)?.kind === 'smx';
+  const planes    = isSmx
+    ? [...document.querySelectorAll('#dst-planes input:checked')].map(cb=>cb.value)
+    : [];
   if (!name) { toast('Name required'); return; }
-  if (!planes.length) { toast('Pick at least one plane'); return; }
+  if (isSmx && !planes.length) { toast('Pick at least one plane'); return; }
   await post('/api/autoswitch/destinations', {name, device_id, output, mode, planes});
   document.getElementById('dst-name').value = '';
   document.querySelectorAll('#dst-planes input').forEach(cb=>cb.checked=true);
@@ -1605,9 +1780,9 @@ function addActionRow(type) {
       <button class="btn btn-sm btn-bad" style="flex:0;padding:3px 7px"
         onclick="document.getElementById('${rowId}').remove()">✕</button>`;
   } else {
-    const smxOpts = smxDevices.map(d=>
+    const smxOpts = switchers.map(d=>
       `<option value="${d.id}">${esc(d.name)}</option>`).join('') ||
-      '<option value="">— no SMX devices —</option>';
+      '<option value="">— no switchers —</option>';
     div.innerHTML = `
       <span class="action-type-tag tag-preset">preset</span>
       <select class="preset-device" style="flex:1">${smxOpts}</select>
