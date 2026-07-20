@@ -10,6 +10,7 @@ Run one Docker container, open a browser, and get a clean control room dashboard
 
 - **Live device dashboard** — status, signal presence, PSU health, temps, fans
 - **Matrix routing control** — tie inputs to outputs on Matrix 12800, SMX, DMS 3600
+- **Auto-switching engine** — signal-aware rules: a console powers on, the right route fires (with fire debounce, release hold, per-destination plane selection, frequency gating)
 - **MTX file editor** — edit Matrix 12800 virtual I/O config files right in the browser
 - **Preset recall** — global and per-device presets with confirmation flow
 - **Name editing** — rename inputs, outputs, presets and push to the switcher
@@ -36,10 +37,18 @@ Run one Docker container, open a browser, and get a clean control room dashboard
 - Docker + Docker Compose (v2)
 - A machine on the same LAN as your AV gear (NAS, server, Pi, whatever)
 
-### Install
+### Install (prebuilt image — no clone needed)
 
 ```bash
-git clone https://github.com/rustjay/joebot-lab.git
+mkdir joebot-lab && cd joebot-lab
+docker run -d --name joebot-lab --network host --restart unless-stopped \
+  -v "$PWD/config:/app/config" ghcr.io/joebot94/joebot-lab:latest
+```
+
+### Install (from source)
+
+```bash
+git clone https://github.com/joebot94/joebot-lab.git
 cd joebot-lab
 docker compose up -d --build
 ```
@@ -48,11 +57,18 @@ Then open **`http://<your-server-ip>:8080`** in a browser.
 
 On a fresh install the setup wizard will appear automatically.
 
+> ⚠️ The dashboard has **no authentication** — it's designed for a trusted LAN.
+> Don't port-forward it to the internet unless you put auth in front of it
+> (reverse proxy with a login, VPN, or Tailscale).
+
 ### Update
 
 ```bash
-git pull
-docker compose up -d --build
+# prebuilt image
+docker pull ghcr.io/joebot94/joebot-lab:latest && docker restart joebot-lab
+
+# from source
+git pull && docker compose up -d --build
 ```
 
 Your config in `./config/` is never touched by updates.
@@ -67,6 +83,8 @@ All config lives in `./config/` (mounted into the container). You can back it up
 |------|----------------|
 | `devices.json` | Your devices (IPs, types, groups) |
 | `setup.json` | Which modules are enabled, setup complete flag |
+| `autoswitch.json` | Auto-switching sources, destinations, rules, engine settings |
+| `autoswitch_state.json` | Engine runtime state (last fired) — survives redeploys |
 | `dms_names.json` | DMS input/output/preset names |
 | `matrix12800_names.json` | Matrix 12800 names |
 | `smx_names.json` | SMX names |
@@ -115,10 +133,11 @@ python app.py
 
 ## Roadmap
 
-- [ ] Auto-switching rules engine (signal-aware routing)
+- [x] Auto-switching rules engine (signal-aware routing)
+- [x] Signal scan rate detection (15/31 kHz frequency gating)
+- [ ] Dashboard authentication (login / API token)
 - [ ] Virtual/macro presets spanning multiple devices
 - [ ] IPCP sub-device config page
-- [ ] Signal scan rate detection and safety routing
 - [ ] MTX config push to Matrix 12800
 
 ---

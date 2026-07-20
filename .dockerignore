@@ -1,0 +1,21 @@
+# Runtime user config — mounted as a volume, never baked into the image
+config/
+
+# Python cruft
+__pycache__/
+*.py[cod]
+*.pyo
+.venv/
+venv/
+
+# Build helpers / scratch
+_welcome_html.py
+
+# Repo metadata
+.git/
+.github/
+.gitignore
+.dockerignore
+docker-compose*.yml
+docker-compose*.yaml
+*.md

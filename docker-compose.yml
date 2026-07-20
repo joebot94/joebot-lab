@@ -1,17 +1,22 @@
+# Runs the prebuilt image from GHCR when available, falls back to building
+# locally (`docker compose up -d --build`). Override any setting with an .env
+# file next to this compose file — every value has a sensible default.
 services:
   joebot-lab:
+    image: ghcr.io/joebot94/joebot-lab:${JOEBOT_TAG:-latest}
     build:
       context: .
       dockerfile: Dockerfile
-    image: joebot-lab:latest
     container_name: joebot-lab
     restart: unless-stopped
+    # Host networking is the simplest way to reach AV gear on your LAN.
+    # DASHBOARD_PORT controls the listen port since there's no port mapping.
     network_mode: host
     environment:
-      DASHBOARD_PORT: "8080"
-      POLL_SECONDS: "10"
-      SOCKET_TIMEOUT_SECONDS: "4"
-      POLL_WORKERS: "16"
+      DASHBOARD_PORT: "${DASHBOARD_PORT:-8080}"
+      POLL_SECONDS: "${POLL_SECONDS:-10}"
+      SOCKET_TIMEOUT_SECONDS: "${SOCKET_TIMEOUT_SECONDS:-4}"
+      POLL_WORKERS: "${POLL_WORKERS:-16}"
       CONFIG_DIR: "/app/config"
     volumes:
-      - ./config:/app/config
+      - ${JOEBOT_CONFIG_DIR:-./config}:/app/config

@@ -41,8 +41,22 @@ def _defaults() -> dict:
         "sources": [],
         "destinations": [],
         "rules": [],
-        "engine": {"enabled": True, "poll_interval": 2.0},
+        "engine": {
+            "enabled": True,
+            "poll_interval": 2.0,
+            # Signal must be continuously present this long before rules fire
+            # (guards against consoles whose sync flickers during boot).
+            "fire_debounce_s": 1.0,
+            # Source must be continuously dark this long before its held
+            # destinations are released (guards against brief dropouts).
+            "release_delay_s": 3.0,
+        },
     }
+
+
+# Consecutive failed polls before a device is declared unreachable. One missed
+# poll is often just a dropped TCP handshake; don't flap offline/online on it.
+OFFLINE_AFTER_MISSES = 3
 
 
 def _load() -> dict:
@@ -188,6 +202,12 @@ class _Engine:
         self._current_route: Dict[str, str] = {}
         # device_id → True (responding) / False (unreachable) / absent (never polled)
         self._device_ok: Dict[str, bool] = {}
+        # device_id → consecutive missed polls (reset on any success)
+        self._miss: Dict[str, int] = {}
+        # device_id → {input: when it first appeared / was last seen} — used
+        # for fire debounce and release delay
+        self._first_seen: Dict[str, Dict[int, float]] = {}
+        self._last_seen: Dict[str, Dict[int, float]] = {}
         # Status
         self.poll_count = 0
         self.last_event: Optional[str] = None
@@ -286,6 +306,30 @@ class _Engine:
             global_base += n_inputs
         return active if got_response else None
 
+    def _effective_active(self, device_id: str, raw_active: Set[int], now: float,
+                          fire_debounce: float, release_delay: float) -> Set[int]:
+        """Debounce raw signal presence into an "effective" active set: an
+        input counts as on only after fire_debounce of continuous signal, and
+        an already-active input counts as off only after release_delay of
+        continuous dark — so a blip never causes a release + re-fire."""
+        first = self._first_seen.setdefault(device_id, {})
+        last = self._last_seen.setdefault(device_id, {})
+        old_active = self._active.get(device_id, set())
+        for inp in raw_active:
+            first.setdefault(inp, now)
+            last[inp] = now
+        for inp in list(first):
+            if inp not in raw_active:
+                del first[inp]
+
+        eff = {inp for inp in raw_active if now - first[inp] >= fire_debounce}
+        # Hold already-active inputs through brief dark spells (and through
+        # the re-debounce after a flicker).
+        for inp in old_active:
+            if inp not in eff and now - last.get(inp, 0) < release_delay:
+                eff.add(inp)
+        return eff
+
     # ── frequency detection ──────────────────────────────────────────────────
 
     def _query_freq(self, device_id: str, global_input: int) -> Optional[str]:
@@ -366,6 +410,8 @@ class _Engine:
                     continue
 
                 interval = max(0.5, float(cfg["engine"].get("poll_interval", 2.0)))
+                fire_debounce = max(0.0, float(cfg["engine"].get("fire_debounce_s", 1.0)))
+                release_delay = max(0.0, float(cfg["engine"].get("release_delay_s", 3.0)))
                 sources = {s["id"]: s for s in cfg.get("sources", [])}
                 dests   = {d["id"]: d for d in cfg.get("destinations", [])}
                 rules   = [r for r in cfg.get("rules", []) if r.get("enabled", True)]
@@ -379,13 +425,17 @@ class _Engine:
                     if not device_id:
                         continue
                     try:
-                        new_active = self._poll_active(device_id)
+                        raw_active = self._poll_active(device_id)
                         self.poll_count += 1
 
-                        if new_active is None:
-                            # Device unreachable — freeze last known state so we
-                            # don't fire spurious rules; surface it in status.
-                            if self._device_ok.get(device_id) is not False:
+                        if raw_active is None:
+                            # Missed poll — freeze last known state so we don't
+                            # fire spurious rules. Only declare the device
+                            # offline after several consecutive misses so a
+                            # single dropped connection doesn't flap the state.
+                            self._miss[device_id] = self._miss.get(device_id, 0) + 1
+                            if (self._miss[device_id] >= OFFLINE_AFTER_MISSES
+                                    and self._device_ok.get(device_id) is not False):
                                 self._device_ok[device_id] = False
                                 err = f"{device_id}: SMX unreachable — auto-switching blind"
                                 log(f"autoswitch: {err}")
@@ -393,12 +443,17 @@ class _Engine:
                                 self._event("offline", f"{device_id} unreachable — engine blind")
                             continue
 
+                        self._miss[device_id] = 0
                         if self._device_ok.get(device_id) is False:
                             log(f"autoswitch: {device_id} reachable again")
                             self._event("online", f"{device_id} reachable again")
                         self._device_ok[device_id] = True
 
                         old_active = self._active.get(device_id, set())
+                        new_active = self._effective_active(
+                            device_id, raw_active, time.time(),
+                            fire_debounce, release_delay,
+                        )
                         self._active[device_id] = new_active
 
                         # Clear current_route entries whose source just went inactive
@@ -515,6 +570,8 @@ class _Engine:
             "running": self.running,
             "enabled": cfg["engine"].get("enabled", True),
             "poll_interval": cfg["engine"].get("poll_interval", 2.0),
+            "fire_debounce_s": cfg["engine"].get("fire_debounce_s", 1.0),
+            "release_delay_s": cfg["engine"].get("release_delay_s", 3.0),
             "poll_count": self.poll_count,
             "last_event": self.last_event,
             "last_event_ago": (
@@ -640,10 +697,24 @@ async def as_add_dest(request: Request):
         "output": int(body.get("output", 1)),
         "mode": body.get("mode", "newest_wins"),
     }
+    planes = _clean_planes(body.get("planes"))
+    if planes:
+        dst["planes"] = planes
     data = _load()
     data["destinations"].append(dst)
     _save(data)
     return JSONResponse(dst)
+
+
+def _clean_planes(raw) -> Optional[List[str]]:
+    """Validate a planes list against the SMX plane codes. Returns None when
+    the selection means "all planes" (empty, invalid, or the full set)."""
+    if not isinstance(raw, list):
+        return None
+    planes = [p for p in _Engine.SMX_PLANES if p in raw]
+    if not planes or len(planes) == len(_Engine.SMX_PLANES):
+        return None
+    return planes
 
 
 @router.put("/api/autoswitch/destinations/{did}")
@@ -653,6 +724,12 @@ async def as_update_dest(did: str, request: Request):
     dst = next((d for d in data["destinations"] if d["id"] == did), None)
     if not dst:
         return JSONResponse({"error": "not found"}, status_code=404)
+    if "planes" in body:
+        planes = _clean_planes(body.pop("planes"))
+        if planes:
+            dst["planes"] = planes
+        else:
+            dst.pop("planes", None)
     dst.update({k: v for k, v in body.items() if k != "id"})
     _save(data)
     return JSONResponse(dst)
@@ -762,6 +839,10 @@ async def as_engine_ctrl(request: Request):
         data["engine"]["enabled"] = bool(body["enabled"])
     if "poll_interval" in body:
         data["engine"]["poll_interval"] = max(0.5, float(body["poll_interval"]))
+    if "fire_debounce_s" in body:
+        data["engine"]["fire_debounce_s"] = min(60.0, max(0.0, float(body["fire_debounce_s"])))
+    if "release_delay_s" in body:
+        data["engine"]["release_delay_s"] = min(60.0, max(0.0, float(body["release_delay_s"])))
     _save(data)
     if data["engine"]["enabled"]:
         _engine.restart()
@@ -806,6 +887,15 @@ main{max-width:1100px;margin:0 auto;padding:18px 16px}
 .dot.off{background:var(--gray)}
 .dot.sq{border-radius:2px;background:var(--purple)}
 .dot.sq.held{background:var(--amber);box-shadow:0 0 5px rgba(252,211,77,.5)}
+
+.plane-row{display:flex;gap:6px;flex-wrap:wrap}
+.plane-cb{display:flex;align-items:center;gap:4px;font-size:10px;color:var(--muted);
+  border:1px solid var(--line);border-radius:5px;padding:3px 7px;cursor:pointer;user-select:none}
+.plane-cb input{accent-color:var(--purple);margin:0}
+.pl-chip{display:inline-block;font-size:8.5px;letter-spacing:.05em;padding:1px 5px;
+  border-radius:4px;border:1px solid var(--line);color:var(--muted);cursor:pointer;
+  margin-left:3px;user-select:none}
+.pl-chip.on{color:var(--purple);border-color:rgba(167,139,250,.5);background:rgba(167,139,250,.08)}
 .item-body{flex:1;min-width:0}
 .iname{font-size:12px;font-weight:700;color:var(--ink)}
 .isub{font-size:10px;color:var(--muted);margin-top:1px}
@@ -987,7 +1077,7 @@ main{max-width:1100px;margin:0 auto;padding:18px 16px}
         </div>
         <div>
           <div class="help-title">Engine</div>
-          <div class="help-text">Polls your SMX devices continuously. It only acts on <b>newly active</b> inputs — turning something on triggers rules. When a source goes dark, its held destinations are released. Pause anytime without losing config.</div>
+          <div class="help-text">Polls your SMX devices continuously. It only acts on <b>newly active</b> inputs — turning something on triggers rules. When a source goes dark, its held destinations are released. <b>Debounce</b> = signal must be on that long before rules fire (rides out console-boot sync flicker); <b>hold</b> = source must be dark that long before release (rides out brief dropouts). Pause anytime without losing config.</div>
         </div>
       </div>
       <div class="help-tip">
@@ -1010,6 +1100,18 @@ main{max-width:1100px;margin:0 auto;padding:18px 16px}
       <div class="eng-stat"><span class="elab">every</span>
         <input id="inp-interval" type="number" min="0.5" max="60" step="0.5"
           class="int-inp" onchange="setInterval_(this.value)"/>
+        <span class="elab">s</span>
+      </div>
+      <div class="eng-stat" title="Signal must be on this long before rules fire">
+        <span class="elab">debounce</span>
+        <input id="inp-debounce" type="number" min="0" max="60" step="0.5"
+          class="int-inp" onchange="setDebounce_(this.value)"/>
+        <span class="elab">s</span>
+      </div>
+      <div class="eng-stat" title="Source must be dark this long before its destination is released">
+        <span class="elab">hold</span>
+        <input id="inp-release" type="number" min="0" max="60" step="0.5"
+          class="int-inp" onchange="setRelease_(this.value)"/>
         <span class="elab">s</span>
       </div>
     </div>
@@ -1077,6 +1179,15 @@ main{max-width:1100px;margin:0 auto;padding:18px 16px}
                 <option value="newest_wins">Newest wins — always switch</option>
                 <option value="keep_current">Keep current — hold until source turns off</option>
               </select></div>
+          </div>
+          <div class="frow">
+            <div class="ff"><label>Planes (which signal layers this destination takes)</label>
+              <div class="plane-row" id="dst-planes">
+                <label class="plane-cb"><input type="checkbox" value="00" checked/>VGA</label>
+                <label class="plane-cb"><input type="checkbox" value="01" checked/>S-Vid</label>
+                <label class="plane-cb"><input type="checkbox" value="02" checked/>Video</label>
+                <label class="plane-cb"><input type="checkbox" value="04" checked/>Audio</label>
+              </div></div>
           </div>
           <div class="frow">
             <button class="btn btn-purple btn-sm" onclick="addDest()">Add</button>
@@ -1172,9 +1283,13 @@ function renderEngine() {
       <span class="sdot ${up?'g':'r'}"></span>${esc(name)} ${up?'online':'UNREACHABLE'}</span>`;
   }).join('');
 
-  // Interval input — don't clobber it while the user is typing in it
+  // Numeric inputs — don't clobber one while the user is typing in it
   const intInp = document.getElementById('inp-interval');
   if (document.activeElement !== intInp) intInp.value = status.poll_interval || 2;
+  const debInp = document.getElementById('inp-debounce');
+  if (document.activeElement !== debInp) debInp.value = status.fire_debounce_s ?? 1;
+  const relInp = document.getElementById('inp-release');
+  if (document.activeElement !== relInp) relInp.value = status.release_delay_s ?? 3;
 
   // Last fired — its own prominent row
   const evEl = document.getElementById('eng-event');
@@ -1291,11 +1406,17 @@ function renderDests() {
     const modeBadge = mode === 'keep_current'
       ? `<span class="mode-badge">🔒 hold</span>` : '';
     const heldNote = held ? ` · <span style="color:var(--amber)">← ${esc(held)}</span>` : '';
+    // Plane chips: absent planes list = all four
+    const active = d.planes || PLANES.map(p=>p.code);
+    const planeChips = PLANES.map(p =>
+      `<span class="pl-chip ${active.includes(p.code)?'on':''}"
+        title="Toggle ${p.name} plane for this destination"
+        onclick="togglePlane('${d.id}','${p.code}')">${p.name}</span>`).join('');
     return `<div class="item">
       <div class="dot sq${held?' held':''}"></div>
       <div class="item-body">
         <div class="iname">${esc(d.name)}${modeBadge}</div>
-        <div class="isub">${esc(devName)} · output ${d.output}${heldNote}</div>
+        <div class="isub">${esc(devName)} · output ${d.output}${heldNote} ${planeChips}</div>
       </div>
       <button class="ic" onclick="cycleMode('${d.id}','${mode}')" title="Toggle mode">⇄</button>
       <button class="ic del" onclick="deleteDst('${d.id}')" title="Delete">✕</button>
@@ -1400,15 +1521,34 @@ async function deleteSrc(id) {
 }
 
 // ── destination CRUD ──────────────────────────────────────────────────────
+const PLANES = [
+  {code:'00', name:'VGA'}, {code:'01', name:'S-Vid'},
+  {code:'02', name:'Video'}, {code:'04', name:'Audio'},
+];
+
 async function addDest() {
   const name      = document.getElementById('dst-name').value.trim();
   const device_id = document.getElementById('dst-device').value;
   const output    = parseInt(document.getElementById('dst-output').value) || 1;
   const mode      = document.getElementById('dst-mode').value;
+  const planes    = [...document.querySelectorAll('#dst-planes input:checked')].map(cb=>cb.value);
   if (!name) { toast('Name required'); return; }
-  await post('/api/autoswitch/destinations', {name, device_id, output, mode});
+  if (!planes.length) { toast('Pick at least one plane'); return; }
+  await post('/api/autoswitch/destinations', {name, device_id, output, mode, planes});
   document.getElementById('dst-name').value = '';
+  document.querySelectorAll('#dst-planes input').forEach(cb=>cb.checked=true);
   toggleForm('dst'); toast('Destination added'); await load();
+}
+
+async function togglePlane(id, code) {
+  const d = cfg.destinations.find(x=>x.id===id);
+  if (!d) return;
+  const active = new Set(d.planes || PLANES.map(p=>p.code));
+  if (active.has(code)) active.delete(code); else active.add(code);
+  if (!active.size) { toast('A destination needs at least one plane'); return; }
+  await put('/api/autoswitch/destinations/'+id, {planes: [...active]});
+  const names = PLANES.filter(p=>active.has(p.code)).map(p=>p.name).join(' + ');
+  toast('Planes: ' + (active.size === PLANES.length ? 'all' : names)); await load();
 }
 
 async function cycleMode(id, current) {
@@ -1510,6 +1650,20 @@ async function setInterval_(val) {
   const v = parseFloat(val);
   if (!v || v < 0.5) return;
   await post('/api/autoswitch/engine', {poll_interval: v}); await load();
+}
+
+async function setDebounce_(val) {
+  const v = parseFloat(val);
+  if (isNaN(v) || v < 0) return;
+  await post('/api/autoswitch/engine', {fire_debounce_s: v});
+  toast('Fire debounce: signal must be on ' + v + 's before rules fire'); await load();
+}
+
+async function setRelease_(val) {
+  const v = parseFloat(val);
+  if (isNaN(v) || v < 0) return;
+  await post('/api/autoswitch/engine', {release_delay_s: v});
+  toast('Release hold: source must be dark ' + v + 's before release'); await load();
 }
 
 // ── forms ─────────────────────────────────────────────────────────────────

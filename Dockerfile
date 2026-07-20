@@ -5,7 +5,8 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY app.py shared.py devices.py sis.py config_store.py dms_control.py dms_names.py mtx_engine.py matrix12800_control.py matrix12800_names.py smx_control.py smx_names.py modules_store.py routes_dms.py routes_mtx_config.py routes_matrix12800.py routes_smx.py routes_ipcp505.py routes_ir.py ir_store.py routes_vsc.py routes_mtpx.py routes_dsc401.py routes_autoswitch.py ./
+# .dockerignore keeps config/, caches, and build helpers out of the image
+COPY *.py ./
 
 ENV DASHBOARD_PORT=8080 \
     POLL_SECONDS=10 \
@@ -15,4 +16,8 @@ ENV DASHBOARD_PORT=8080 \
 
 EXPOSE 8080
 
-CMD ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8080"]
+HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
+    CMD python -c "import os,urllib.request;urllib.request.urlopen('http://127.0.0.1:'+os.environ.get('DASHBOARD_PORT','8080')+'/api/status',timeout=4)"
+
+# Shell form so DASHBOARD_PORT is honored — exec-form arrays don't expand env vars
+CMD uvicorn app:app --host 0.0.0.0 --port ${DASHBOARD_PORT:-8080}
