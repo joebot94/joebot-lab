@@ -892,9 +892,11 @@ main{max-width:1100px;margin:0 auto;padding:18px 16px}
 .plane-cb{display:flex;align-items:center;gap:4px;font-size:10px;color:var(--muted);
   border:1px solid var(--line);border-radius:5px;padding:3px 7px;cursor:pointer;user-select:none}
 .plane-cb input{accent-color:var(--purple);margin:0}
-.pl-chip{display:inline-block;font-size:8.5px;letter-spacing:.05em;padding:1px 5px;
-  border-radius:4px;border:1px solid var(--line);color:var(--muted);cursor:pointer;
-  margin-left:3px;user-select:none}
+.pl-row{display:flex;gap:4px;margin-top:4px;flex-wrap:wrap}
+.pl-chip{display:inline-block;font-size:8.5px;letter-spacing:.05em;padding:1px 6px;
+  border-radius:4px;border:1px solid var(--line);color:var(--faint);cursor:pointer;
+  user-select:none;transition:all .12s}
+.pl-chip:hover{border-color:var(--muted);color:var(--muted)}
 .pl-chip.on{color:var(--purple);border-color:rgba(167,139,250,.5);background:rgba(167,139,250,.08)}
 .item-body{flex:1;min-width:0}
 .iname{font-size:12px;font-weight:700;color:var(--ink)}
@@ -921,6 +923,10 @@ main{max-width:1100px;margin:0 auto;padding:18px 16px}
 
 .rule{background:var(--panel2);border:1px solid var(--line);border-radius:7px;
   padding:9px 12px;margin-bottom:6px;display:flex;align-items:center;gap:8px}
+/* When the rule sentence wraps on narrow screens, keep the controls pinned
+   top-right instead of floating between the wrapped chip lines */
+@media(max-width:640px){.rule{align-items:flex-start}
+  .rule .tog,.rule .ic{margin-top:2px}}
 .rule.disabled{opacity:.45}
 .rrow{flex:1;display:flex;align-items:center;gap:5px;flex-wrap:wrap}
 .kw{font-size:10px;color:var(--muted);white-space:nowrap}
@@ -944,6 +950,11 @@ main{max-width:1100px;margin:0 auto;padding:18px 16px}
 .eng-card{background:var(--panel);border:1px solid var(--line);border-radius:10px;
   padding:12px 16px;margin-bottom:12px}
 .eng-top{display:flex;align-items:center;gap:14px;flex-wrap:wrap;margin-bottom:10px}
+.eng-tunes{display:inline-flex;align-items:center;gap:10px;flex-wrap:wrap;
+  margin-bottom:10px;padding:5px 12px;background:var(--panel2);
+  border:1px solid var(--line);border-radius:7px}
+.tune-sep{width:1px;height:14px;background:var(--line)}
+@media(max-width:640px){.tune-sep{display:none}}
 .eng-stat{display:flex;align-items:center;gap:6px;font-size:12px}
 .sdot{width:7px;height:7px;border-radius:50%}
 .sdot.g{background:var(--ok);box-shadow:0 0 4px rgba(52,211,153,.5)}
@@ -1097,17 +1108,22 @@ main{max-width:1100px;margin:0 auto;padding:18px 16px}
       <div id="dev-chips" style="display:flex;gap:6px;flex-wrap:wrap"></div>
       <div class="spacer"></div>
       <div class="eng-stat"><span class="elab">polls</span><span class="eval" id="eng-poll">–</span></div>
-      <div class="eng-stat"><span class="elab">every</span>
+    </div>
+    <div class="eng-tunes">
+      <div class="eng-stat" title="How often the engine polls for signal changes">
+        <span class="elab">every</span>
         <input id="inp-interval" type="number" min="0.5" max="60" step="0.5"
           class="int-inp" onchange="setInterval_(this.value)"/>
         <span class="elab">s</span>
       </div>
+      <span class="tune-sep"></span>
       <div class="eng-stat" title="Signal must be on this long before rules fire">
         <span class="elab">debounce</span>
         <input id="inp-debounce" type="number" min="0" max="60" step="0.5"
           class="int-inp" onchange="setDebounce_(this.value)"/>
         <span class="elab">s</span>
       </div>
+      <span class="tune-sep"></span>
       <div class="eng-stat" title="Source must be dark this long before its destination is released">
         <span class="elab">hold</span>
         <input id="inp-release" type="number" min="0" max="60" step="0.5"
@@ -1268,7 +1284,7 @@ function renderEngine() {
   // Status dot + label
   if (running && anyDown) {
     document.getElementById('eng-dot').className = 'sdot r';
-    document.getElementById('eng-running').textContent = 'engine blind — SMX down';
+    document.getElementById('eng-running').textContent = 'engine blind';
   } else {
     document.getElementById('eng-dot').className = 'sdot ' + (running?'g': status.enabled?'a':'r');
     document.getElementById('eng-running').textContent =
@@ -1307,8 +1323,10 @@ function renderEngine() {
   document.getElementById('eng-poll').textContent =
     (status.poll_count||0).toLocaleString();
 
+  // Unreachable-device errors are already shown by the red device chip —
+  // only surface errors that add new information.
   const errWrap = document.getElementById('eng-err-wrap');
-  const errs = status.errors || [];
+  const errs = (status.errors || []).filter(e => !/unreachable/i.test(e));
   errWrap.style.display = errs.length ? 'block' : 'none';
   if (errs.length) document.getElementById('eng-err').textContent = errs[errs.length-1];
 
@@ -1406,7 +1424,8 @@ function renderDests() {
     const modeBadge = mode === 'keep_current'
       ? `<span class="mode-badge">🔒 hold</span>` : '';
     const heldNote = held ? ` · <span style="color:var(--amber)">← ${esc(held)}</span>` : '';
-    // Plane chips: absent planes list = all four
+    // Plane chips: absent planes list = all four. Rendered on their own row
+    // so they never ragged-wrap into the device/output line.
     const active = d.planes || PLANES.map(p=>p.code);
     const planeChips = PLANES.map(p =>
       `<span class="pl-chip ${active.includes(p.code)?'on':''}"
@@ -1416,7 +1435,8 @@ function renderDests() {
       <div class="dot sq${held?' held':''}"></div>
       <div class="item-body">
         <div class="iname">${esc(d.name)}${modeBadge}</div>
-        <div class="isub">${esc(devName)} · output ${d.output}${heldNote} ${planeChips}</div>
+        <div class="isub">${esc(devName)} · output ${d.output}${heldNote}</div>
+        <div class="pl-row">${planeChips}</div>
       </div>
       <button class="ic" onclick="cycleMode('${d.id}','${mode}')" title="Toggle mode">⇄</button>
       <button class="ic del" onclick="deleteDst('${d.id}')" title="Delete">✕</button>
@@ -1464,8 +1484,8 @@ function renderRules() {
     const togCls = r.enabled ? 'on' : 'off';
     return `<div class="rule ${r.enabled?'':'disabled'}">
       <div class="rrow">
-        <span class="kw">when</span>${srcChip}<span class="kw">turns on</span>
-        ${actionChips}${freqChip}
+        <span class="kw">when</span>${srcChip}<span class="kw">turns on</span>${freqChip}
+        ${actionChips}
       </div>
       <button class="ic" title="Fire this rule right now (test)" onclick="testRule('${r.id}')"
         style="color:var(--blue)">▶</button>
@@ -1681,7 +1701,7 @@ function toggleForm(which) {
 // ── helpers ───────────────────────────────────────────────────────────────
 function esc(s){return String(s==null?'':s).replace(/[&<>"]/g,
   c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));}
-function fmtAgo(s){if(s==null)return '';if(s<60)return s+'s ago';if(s<3600)return Math.floor(s/60)+'m ago';return Math.floor(s/3600)+'h ago';}
+function fmtAgo(s){if(s==null)return '';if(s<60)return s+'s ago';if(s<3600)return Math.floor(s/60)+'m ago';if(s<172800)return Math.floor(s/3600)+'h ago';return Math.floor(s/86400)+'d ago';}
 async function post(url,body){return (await fetch(url,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)})).json();}
 async function put(url,body){return (await fetch(url,{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)})).json();}
 async function del(url){return fetch(url,{method:'DELETE'});}
