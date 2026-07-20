@@ -401,6 +401,7 @@ class _Engine:
     # are confirmed working from the manual routing page):
     #   {plane}*{input}*{output}!   planes: 00=VGA 01=S-Video 02=Video 04=Audio
     SMX_PLANES = ["00", "01", "02", "04"]
+    PLANE_NAMES = {"00": "VGA", "01": "S-Vid", "02": "Video", "04": "Audio"}
 
     def _route(self, src: dict, dst: dict, fallback_device_id: str):
         device_id = dst.get("device_id") or fallback_device_id
@@ -411,11 +412,15 @@ class _Engine:
         inp = src["input"]
         out = dst["output"]
         if self._kind(device_id) == "smx":
-            # Destination may limit which planes it takes (breakaway routing);
-            # default is all planes so the console goes everywhere it should.
-            planes = dst.get("planes") or self.SMX_PLANES
+            # Plane resolution: the tie follows the source's planes (what the
+            # console actually feeds) unless the destination explicitly
+            # overrides; neither set = all four planes.
+            planes = dst.get("planes") or src.get("planes") or self.SMX_PLANES
             resps = [conn.send(f"{p}*{inp}*{out}!") for p in planes]
-            detail = f"{inp}*{out} on {len(planes)} planes"
+            if len(planes) == len(self.SMX_PLANES):
+                detail = f"{inp}*{out} on all planes"
+            else:
+                detail = f"{inp}*{out} · " + "+".join(self.PLANE_NAMES.get(p, p) for p in planes)
             log_detail = f"planes {planes} → {resps!r}"
         else:
             # Single-plane crosspoint: standard SIS tie
@@ -707,6 +712,11 @@ async def as_add_source(request: Request):
         "device_id": body.get("device_id", ""),
         "input": int(body.get("input", 1)),
     }
+    # Which planes this console actually lives on (SMX only) — fired ties
+    # follow the source's planes unless the destination overrides.
+    planes = _clean_planes(body.get("planes"))
+    if planes:
+        src["planes"] = planes
     data = _load()
     data["sources"].append(src)
     _save(data)
@@ -720,6 +730,12 @@ async def as_update_source(sid: str, request: Request):
     src = next((s for s in data["sources"] if s["id"] == sid), None)
     if not src:
         return JSONResponse({"error": "not found"}, status_code=404)
+    if "planes" in body:
+        planes = _clean_planes(body.pop("planes"))
+        if planes:
+            src["planes"] = planes
+        else:
+            src.pop("planes", None)
     src.update({k: v for k, v in body.items() if k != "id"})
     _save(data)
     return JSONResponse(src)
@@ -759,14 +775,14 @@ async def as_add_dest(request: Request):
 
 
 def _clean_planes(raw) -> Optional[List[str]]:
-    """Validate a planes list against the SMX plane codes. Returns None when
-    the selection means "all planes" (empty, invalid, or the full set)."""
+    """Validate a planes list against the SMX plane codes. Returns None for
+    empty/invalid (meaning "no explicit selection" — sources: all planes,
+    destinations: follow the source). A full set is kept as an explicit
+    choice so a destination can pin all four even for a subset source."""
     if not isinstance(raw, list):
         return None
     planes = [p for p in _Engine.SMX_PLANES if p in raw]
-    if not planes or len(planes) == len(_Engine.SMX_PLANES):
-        return None
-    return planes
+    return planes or None
 
 
 @router.put("/api/autoswitch/destinations/{did}")
@@ -968,9 +984,12 @@ main{max-width:1100px;margin:0 auto;padding:18px 16px}
 @keyframes srcpulse{50%{box-shadow:0 0 10px rgba(52,211,153,.9)}}
 
 .plane-row{display:flex;gap:6px;flex-wrap:wrap}
-.plane-cb{display:flex;align-items:center;gap:4px;font-size:10px;color:var(--muted);
-  border:1px solid var(--line);border-radius:5px;padding:3px 7px;cursor:pointer;user-select:none}
-.plane-cb input{accent-color:var(--purple);margin:0}
+.plane-cb{display:inline-flex;align-items:center;gap:5px;font-size:10px;color:var(--muted);
+  border:1px solid var(--line);border-radius:5px;padding:3px 8px;cursor:pointer;
+  user-select:none;white-space:nowrap}
+.plane-cb input{accent-color:var(--purple);margin:0;width:12px;height:12px;flex-shrink:0}
+.pl-chip.follow{color:var(--muted);border-style:dashed;font-style:italic}
+.pl-chip.auto{color:var(--faint);border-style:dashed}
 .pl-row{display:flex;gap:4px;margin-top:4px;flex-wrap:wrap}
 .pl-chip{display:inline-block;font-size:8.5px;letter-spacing:.05em;padding:1px 6px;
   border-radius:4px;border:1px solid var(--line);color:var(--faint);cursor:pointer;
@@ -1160,7 +1179,7 @@ main{max-width:1100px;margin:0 auto;padding:18px 16px}
         </div>
         <div>
           <div class="help-title">Destinations</div>
-          <div class="help-text">A <b>destination</b> is a physical output — e.g. "20&quot; CRT" on output 2. Each destination has a <b>mode</b>: <b>Newest wins</b> means any new signal takes over; <b>Keep current</b> means the first thing routed there stays until it turns off.</div>
+          <div class="help-text">A <b>destination</b> is a physical output — e.g. "20&quot; CRT" on output 2. Each destination has a <b>mode</b>: <b>Newest wins</b> means any new signal takes over; <b>Keep current</b> means the first thing routed there stays until it turns off. On SMX, <b>planes follow the source</b> — a source marked S-Vid+Audio ties just those — unless the destination sets an explicit override.</div>
         </div>
         <div>
           <div class="help-title">Rules &amp; Actions</div>
@@ -1250,12 +1269,23 @@ main{max-width:1100px;margin:0 auto;padding:18px 16px}
             <div class="ff"><label>Name</label>
               <input id="src-name" placeholder="Super Nintendo"/></div>
             <div class="ff"><label>Switcher</label>
-              <select id="src-device" onchange="syncSrcNote()"></select>
+              <select id="src-device" onchange="syncSrcNote();syncPlaneRow()"></select>
               <div class="detect-note" id="src-detect-note"></div></div>
           </div>
           <div class="frow">
             <div class="ff"><label>Input #</label>
               <input id="src-input" type="number" min="1" max="128" value="1" style="max-width:80px"/></div>
+          </div>
+          <div class="frow">
+            <div class="ff" id="src-planes-ff"><label>Planes this console feeds (ties follow these)</label>
+              <div class="plane-row" id="src-planes">
+                <label class="plane-cb"><input type="checkbox" value="00" checked/>VGA</label>
+                <label class="plane-cb"><input type="checkbox" value="01" checked/>S-Vid</label>
+                <label class="plane-cb"><input type="checkbox" value="02" checked/>Video</label>
+                <label class="plane-cb"><input type="checkbox" value="04" checked/>Audio</label>
+              </div></div>
+          </div>
+          <div class="frow">
             <div class="ff" style="justify-content:flex-end;flex-direction:row;gap:6px;align-items:flex-end">
               <button class="btn btn-blue btn-sm" onclick="addSource()">Add</button>
               <button class="btn btn-sm" onclick="toggleForm('src')">Cancel</button>
@@ -1291,12 +1321,16 @@ main{max-width:1100px;margin:0 auto;padding:18px 16px}
               </select></div>
           </div>
           <div class="frow">
-            <div class="ff" id="dst-planes-ff"><label>Planes (which signal layers this destination takes)</label>
-              <div class="plane-row" id="dst-planes">
-                <label class="plane-cb"><input type="checkbox" value="00" checked/>VGA</label>
-                <label class="plane-cb"><input type="checkbox" value="01" checked/>S-Vid</label>
-                <label class="plane-cb"><input type="checkbox" value="02" checked/>Video</label>
-                <label class="plane-cb"><input type="checkbox" value="04" checked/>Audio</label>
+            <div class="ff" id="dst-planes-ff"><label>Planes</label>
+              <div class="plane-row">
+                <label class="plane-cb" title="Tie whatever planes the firing source declares">
+                  <input type="checkbox" id="dst-follow" checked onchange="syncFollow()"/>Follow source</label>
+                <span class="plane-row" id="dst-planes" style="display:none">
+                  <label class="plane-cb"><input type="checkbox" value="00" checked/>VGA</label>
+                  <label class="plane-cb"><input type="checkbox" value="01" checked/>S-Vid</label>
+                  <label class="plane-cb"><input type="checkbox" value="02" checked/>Video</label>
+                  <label class="plane-cb"><input type="checkbox" value="04" checked/>Audio</label>
+                </span>
               </div></div>
           </div>
           <div class="frow">
@@ -1497,11 +1531,19 @@ function renderSources() {
     const state = active
       ? ' · <span style="color:var(--ok)">signal active</span>'
       : (lastAgo != null ? ` · last active ${fmtAgo(lastAgo)}` : '');
+    // Plane chips (SMX only): which planes this console feeds — ties follow
+    // these. Absent = all four.
+    const srcActivePlanes = s.planes || PLANES.map(p=>p.code);
+    const srcPlaneChips = dev?.kind !== 'smx' ? '' : PLANES.map(p =>
+      `<span class="pl-chip ${srcActivePlanes.includes(p.code)?'on':''}"
+        title="Toggle ${p.name} — ties fired by this source follow its planes"
+        onclick="togglePlaneSrc('${s.id}','${p.code}')">${p.name}</span>`).join('');
     return `<div class="item">
       <div class="dot ${active?'on':'off'}"></div>
       <div class="item-body">
         <div class="iname">${esc(s.name)}${rgbTag}</div>
         <div class="isub">${esc(devName)} · input ${s.input}${state}</div>
+        ${srcPlaneChips ? `<div class="pl-row">${srcPlaneChips}</div>` : ''}
       </div>
       <button class="ic del" onclick="deleteSrc('${s.id}')" title="Delete">✕</button>
     </div>`;
@@ -1527,14 +1569,23 @@ function renderDests() {
     const modeBadge = mode === 'keep_current'
       ? `<span class="mode-badge">🔒 hold</span>` : '';
     const heldNote = held ? ` · <span style="color:var(--amber)">← ${esc(held)}</span>` : '';
-    // Plane chips: SMX only (crosspoints are single-plane). Absent planes
-    // list = all four. Own row so they never ragged-wrap into the sub line.
+    // Plane chips: SMX only (crosspoints are single-plane). No explicit
+    // planes = follow whatever the firing source declares; explicit list =
+    // override, with an "auto" chip to go back to following.
     const isSmx = switchers.find(x=>x.id===d.device_id)?.kind === 'smx';
-    const active = d.planes || PLANES.map(p=>p.code);
-    const planeChips = !isSmx ? '' : PLANES.map(p =>
-      `<span class="pl-chip ${active.includes(p.code)?'on':''}"
-        title="Toggle ${p.name} plane for this destination"
-        onclick="togglePlane('${d.id}','${p.code}')">${p.name}</span>`).join('');
+    let planeChips = '';
+    if (isSmx && !d.planes) {
+      planeChips = `<span class="pl-chip follow"
+        title="Ties take whatever planes the firing source feeds — click to set an explicit override"
+        onclick="unfollowPlanes('${d.id}')">follows source planes</span>`;
+    } else if (isSmx) {
+      planeChips = PLANES.map(p =>
+        `<span class="pl-chip ${d.planes.includes(p.code)?'on':''}"
+          title="Toggle ${p.name} plane override"
+          onclick="togglePlane('${d.id}','${p.code}')">${p.name}</span>`).join('') +
+        `<span class="pl-chip auto" title="Clear override — follow the source's planes again"
+          onclick="followPlanes('${d.id}')">↺ auto</span>`;
+    }
     return `<div class="item">
       <div class="dot sq${held?' held':''}"></div>
       <div class="item-body">
@@ -1707,9 +1758,16 @@ async function addSource() {
   const name      = document.getElementById('src-name').value.trim();
   const device_id = document.getElementById('src-device').value;
   const input     = parseInt(document.getElementById('src-input').value) || 1;
+  const isSmx     = switchers.find(d=>d.id===device_id)?.kind === 'smx';
+  let planes = isSmx
+    ? [...document.querySelectorAll('#src-planes input:checked')].map(cb=>cb.value)
+    : [];
+  if (isSmx && !planes.length) { toast('Pick at least one plane'); return; }
+  if (planes.length === PLANES.length) planes = [];  // all = default, store nothing
   if (!name) { toast('Name required'); return; }
-  await post('/api/autoswitch/sources', {name, device_id, input});
+  await post('/api/autoswitch/sources', {name, device_id, input, planes});
   document.getElementById('src-name').value = '';
+  document.querySelectorAll('#src-planes input').forEach(cb=>cb.checked=true);
   toggleForm('src'); toast('Source added'); await load();
 }
 
@@ -1741,10 +1799,19 @@ function syncSrcNote() {
   el.className = 'detect-note' + (note?.warn ? ' warn' : '');
 }
 
-// Planes only apply to SMX destinations — hide the row for crosspoints
+// Planes only apply to SMX devices — hide the rows for crosspoints
 function syncPlaneRow() {
-  const kind = switchers.find(d=>d.id===document.getElementById('dst-device').value)?.kind;
-  document.getElementById('dst-planes-ff').style.display = kind === 'smx' ? '' : 'none';
+  const dstKind = switchers.find(d=>d.id===document.getElementById('dst-device').value)?.kind;
+  document.getElementById('dst-planes-ff').style.display = dstKind === 'smx' ? '' : 'none';
+  const srcKind = switchers.find(d=>d.id===document.getElementById('src-device').value)?.kind;
+  document.getElementById('src-planes-ff').style.display = srcKind === 'smx' ? '' : 'none';
+}
+
+// Destination planes default to following the source; custom boxes only
+// appear when "Follow source" is unchecked
+function syncFollow() {
+  const follow = document.getElementById('dst-follow').checked;
+  document.getElementById('dst-planes').style.display = follow ? 'none' : '';
 }
 
 async function addDest() {
@@ -1753,14 +1820,17 @@ async function addDest() {
   const output    = parseInt(document.getElementById('dst-output').value) || 1;
   const mode      = document.getElementById('dst-mode').value;
   const isSmx     = switchers.find(d=>d.id===device_id)?.kind === 'smx';
-  const planes    = isSmx
+  const follow    = document.getElementById('dst-follow').checked;
+  const planes    = (isSmx && !follow)
     ? [...document.querySelectorAll('#dst-planes input:checked')].map(cb=>cb.value)
-    : [];
+    : [];  // empty = follow the source's planes
   if (!name) { toast('Name required'); return; }
-  if (isSmx && !planes.length) { toast('Pick at least one plane'); return; }
+  if (isSmx && !follow && !planes.length) { toast('Pick at least one plane (or Follow source)'); return; }
   await post('/api/autoswitch/destinations', {name, device_id, output, mode, planes});
   document.getElementById('dst-name').value = '';
+  document.getElementById('dst-follow').checked = true;
   document.querySelectorAll('#dst-planes input').forEach(cb=>cb.checked=true);
+  syncFollow();
   toggleForm('dst'); toast('Destination added'); await load();
 }
 
@@ -1769,10 +1839,32 @@ async function togglePlane(id, code) {
   if (!d) return;
   const active = new Set(d.planes || PLANES.map(p=>p.code));
   if (active.has(code)) active.delete(code); else active.add(code);
-  if (!active.size) { toast('A destination needs at least one plane'); return; }
+  if (!active.size) { toast('An override needs at least one plane — use ↺ auto to follow the source'); return; }
   await put('/api/autoswitch/destinations/'+id, {planes: [...active]});
   const names = PLANES.filter(p=>active.has(p.code)).map(p=>p.name).join(' + ');
-  toast('Planes: ' + (active.size === PLANES.length ? 'all' : names)); await load();
+  toast('Override: ' + names); await load();
+}
+
+async function unfollowPlanes(id) {
+  await put('/api/autoswitch/destinations/'+id, {planes: PLANES.map(p=>p.code)});
+  toast('Explicit override — toggle planes, or ↺ auto to follow the source again'); await load();
+}
+
+async function followPlanes(id) {
+  await put('/api/autoswitch/destinations/'+id, {planes: []});
+  toast('Following source planes'); await load();
+}
+
+async function togglePlaneSrc(id, code) {
+  const s = cfg.sources.find(x=>x.id===id);
+  if (!s) return;
+  const active = new Set(s.planes || PLANES.map(p=>p.code));
+  if (active.has(code)) active.delete(code); else active.add(code);
+  if (!active.size) { toast('A source needs at least one plane'); return; }
+  const all = active.size === PLANES.length;
+  await put('/api/autoswitch/sources/'+id, {planes: all ? [] : [...active]});
+  const names = PLANES.filter(p=>active.has(p.code)).map(p=>p.name).join(' + ');
+  toast(s.name + ' feeds: ' + (all ? 'all planes' : names)); await load();
 }
 
 async function cycleMode(id, current) {
