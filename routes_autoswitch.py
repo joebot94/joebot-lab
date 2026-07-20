@@ -61,9 +61,12 @@ OFFLINE_AFTER_MISSES = 3
 # Kinds the engine can drive. "smx" is the multi-plane special case; the rest
 # are treated as single-plane crosspoints speaking standard SIS:
 #   tie {in}*{out}!   ·   signal presence 0LS bitmap   ·   preset recall {n}.
-# (tie verified on DMS 3600 + Matrix 12800; 0LS bitmap verified on DMS 3600,
-# standard-SIS-but-unverified elsewhere — a device that never answers 0LS just
-# reads as unreachable to the engine. extron_info covers MTPX/SW4/DVS gear.)
+# (tie verified on DMS 3600 + Matrix 12800; 0LS bitmap live-verified on
+# DMS 3600. Signal-reporting caveat: the Matrix 12800 only sync-detects RGBHV —
+# composite / S-Video inputs never report, so detection-driven rules can't see
+# them (routing/ties still work). DMS 3600 and DXP report every input fully.
+# A device that never answers 0LS just reads as unreachable to the engine.
+# extron_info covers MTPX/SW4/DVS-class gear.)
 ROUTABLE_KINDS = {"smx", "dms3600", "matrix12800", "extron_info"}
 
 
@@ -1086,6 +1089,11 @@ main{max-width:1100px;margin:0 auto;padding:18px 16px}
 .route-pill .rp-src{color:var(--blue)}
 .route-pill .rp-arr{color:var(--muted)}
 
+.detect-note{font-size:9.5px;line-height:1.4;margin-top:4px;color:var(--muted)}
+.detect-note.warn{color:var(--amber)}
+.detect-tag{display:inline-block;font-size:8.5px;letter-spacing:.05em;padding:1px 5px;
+  border-radius:4px;margin-left:4px;color:var(--amber);
+  border:1px solid rgba(252,211,77,.35);background:rgba(252,211,77,.06)}
 .smx-hint{font-size:10px;color:var(--muted);padding:8px 12px;
   border-top:1px solid var(--line)}
 
@@ -1164,7 +1172,7 @@ main{max-width:1100px;margin:0 auto;padding:18px 16px}
         </div>
         <div>
           <div class="help-title">Engine</div>
-          <div class="help-text">Polls your switchers continuously — SMX (multi-plane) plus single-plane crosspoints like the DMS 3600 and Matrix 12800 (standard SIS tie + 0LS signal presence). It only acts on <b>newly active</b> inputs — turning something on triggers rules. When a source goes dark, its held destinations are released. <b>Debounce</b> = signal must be on that long before rules fire (rides out console-boot sync flicker); <b>hold</b> = source must be dark that long before release (rides out brief dropouts). Pause anytime without losing config.</div>
+          <div class="help-text">Polls your switchers continuously — SMX (multi-plane) plus single-plane crosspoints (standard SIS tie + 0LS signal presence). Full signal reporting: DMS 3600, DXP. <b>Matrix 12800 sync-detects RGBHV only</b> — composite / S-Video inputs never report, so don't hang rules on them. It only acts on <b>newly active</b> inputs — turning something on triggers rules. When a source goes dark, its held destinations are released. <b>Debounce</b> = signal must be on that long before rules fire (rides out console-boot sync flicker); <b>hold</b> = source must be dark that long before release (rides out brief dropouts). Pause anytime without losing config.</div>
         </div>
       </div>
       <div class="help-tip">
@@ -1242,7 +1250,8 @@ main{max-width:1100px;margin:0 auto;padding:18px 16px}
             <div class="ff"><label>Name</label>
               <input id="src-name" placeholder="Super Nintendo"/></div>
             <div class="ff"><label>Switcher</label>
-              <select id="src-device"></select></div>
+              <select id="src-device" onchange="syncSrcNote()"></select>
+              <div class="detect-note" id="src-detect-note"></div></div>
           </div>
           <div class="frow">
             <div class="ff"><label>Input #</label>
@@ -1480,7 +1489,10 @@ function renderSources() {
   }
   el.innerHTML = cfg.sources.map(s => {
     const active = (status.active_inputs?.[s.device_id] || []).includes(s.input);
-    const devName = switchers.find(d=>d.id===s.device_id)?.name || s.device_id || '?';
+    const dev = switchers.find(d=>d.id===s.device_id);
+    const devName = dev?.name || s.device_id || '?';
+    const rgbTag = dev?.kind === 'matrix12800'
+      ? '<span class="detect-tag" title="Matrix 12800 sync-detects RGBHV only — composite / S-Video inputs never report">RGBHV-only detect</span>' : '';
     const lastAgo = status.last_active?.[s.device_id]?.[s.input];
     const state = active
       ? ' · <span style="color:var(--ok)">signal active</span>'
@@ -1488,7 +1500,7 @@ function renderSources() {
     return `<div class="item">
       <div class="dot ${active?'on':'off'}"></div>
       <div class="item-body">
-        <div class="iname">${esc(s.name)}</div>
+        <div class="iname">${esc(s.name)}${rgbTag}</div>
         <div class="isub">${esc(devName)} · input ${s.input}${state}</div>
       </div>
       <button class="ic del" onclick="deleteSrc('${s.id}')" title="Delete">✕</button>
@@ -1684,6 +1696,7 @@ function render() {
     if (prev && [...el.options].some(o=>o.value===prev)) el.value = prev;
   });
   syncPlaneRow();
+  syncSrcNote();
   document.getElementById('rule-src').innerHTML =
     cfg.sources.map(s=>`<option value="${s.id}">${esc(s.name)}</option>`).join('') ||
     '<option>— add a source first —</option>';
@@ -1711,6 +1724,22 @@ const PLANES = [
   {code:'00', name:'VGA'}, {code:'01', name:'S-Vid'},
   {code:'02', name:'Video'}, {code:'04', name:'Audio'},
 ];
+
+// Signal-detection capability by device kind. The Matrix 12800 only sync-
+// detects RGBHV — composite / S-Video routed through it never reports, so
+// rules watching those inputs will simply never see them turn on.
+const DETECT_NOTES = {
+  matrix12800: {warn: true,  text: "⚠ Matrix 12800 detects RGBHV sync only — composite / S-Video inputs will never report signal here"},
+  extron_info: {warn: false, text: "Signal reporting varies by model (DXP: full; MTPX: unverified) — use a rule's ▶ test button to check"},
+};
+
+function syncSrcNote() {
+  const kind = switchers.find(d=>d.id===document.getElementById('src-device').value)?.kind;
+  const note = DETECT_NOTES[kind];
+  const el = document.getElementById('src-detect-note');
+  el.textContent = note ? note.text : '';
+  el.className = 'detect-note' + (note?.warn ? ' warn' : '');
+}
 
 // Planes only apply to SMX destinations — hide the row for crosspoints
 function syncPlaneRow() {
